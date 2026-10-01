@@ -1,0 +1,27 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Research artifacts / raw API dumps
+data/raw/
+*.sqlite
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

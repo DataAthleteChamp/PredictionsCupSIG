@@ -28,3 +28,6 @@ venv/
 
 # Research scratch - not committed yet (will be formalised later)
 research/
+
+# stray image artifacts
+*.pgm

@@ -227,6 +227,33 @@ class Client:
             body["price"] = price
         return self._call("POST", "/orders", key=self.s.exec_key, body=body)
 
+    def place_batch(self, orders: list[dict],
+                    idempotency_key: str | None = None) -> dict:
+        """
+        Place up to 50 orders in ONE request.
+
+        This matters enormously for cycle latency: placing 229 orders singly costs
+        229 requests (~7.9 min at our rate limit), by which time the quotes that
+        produced them are long stale — measured dislocation reversion is ~2 min
+        median. Batched, the same 229 orders cost 5 requests.
+
+        The venue places them serially under a time budget and may return 207
+        (partial) or 503 part-way, keeping orders already placed. Retrying with
+        the SAME key resumes rather than duplicating.
+
+        `orders` items are dicts of exchangeId/side/action/quantity/price.
+        """
+        self._require_live()
+        if not orders:
+            return {"results": []}
+        if len(orders) > 50:
+            raise ValueError("batch limit is 50 orders")
+        body = {
+            "idempotencyKey": idempotency_key or f"sigbot-batch-{uuid.uuid4()}",
+            "orders": [{**o, "tournamentId": self.s.tournament_id} for o in orders],
+        }
+        return self._call("POST", "/orders/batch", key=self.s.exec_key, body=body)
+
     def cancel_order(self, order_id: int) -> Any:
         self._require_live()
         return self._call("DELETE", f"/orders/{order_id}", key=self.s.exec_key)

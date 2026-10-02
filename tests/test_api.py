@@ -210,3 +210,54 @@ def test_prices_empty_input_makes_no_calls():
     c = Client(make_settings(), transport=t, sleep=lambda s: None)
     assert c.prices([]) == {}
     assert not t.calls
+
+
+# ------------------------------------------------------------- batching -----
+
+def test_place_batch_sends_all_orders_in_one_request():
+    """229 orders singly = ~8 min at our rate limit. Batched = ~30 seconds."""
+    t = FakeTransport([Response(200, {"results": [{"ok": True}] * 3})])
+    c = Client(make_settings(dry_run=False, live_trading=True), transport=t,
+               sleep=lambda s: None)
+    orders = [{"exchangeId": str(i), "side": "yes", "action": "buy",
+               "quantity": 10, "price": 0.5} for i in range(3)]
+    c.place_batch(orders)
+    assert len(t.calls) == 1
+    body = t.calls[0]["body"]
+    assert len(body["orders"]) == 3
+    assert body["idempotencyKey"]
+    assert all("tournamentId" in o for o in body["orders"])
+
+
+def test_place_batch_rejects_more_than_fifty():
+    c = Client(make_settings(dry_run=False, live_trading=True),
+               transport=FakeTransport([]), sleep=lambda s: None)
+    with pytest.raises(ValueError):
+        c.place_batch([{"exchangeId": "1"}] * 51)
+
+
+def test_place_batch_empty_is_a_noop():
+    t = FakeTransport([])
+    c = Client(make_settings(dry_run=False, live_trading=True), transport=t,
+               sleep=lambda s: None)
+    assert c.place_batch([]) == {"results": []}
+    assert not t.calls
+
+
+def test_place_batch_requires_live_latches():
+    c = Client(make_settings(dry_run=True), transport=FakeTransport([]),
+               sleep=lambda s: None)
+    with pytest.raises(DryRunBlocked):
+        c.place_batch([{"exchangeId": "1"}])
+
+
+def test_batch_retry_reuses_the_same_key_so_it_resumes():
+    """A 503 part-way keeps orders already placed; the same key resumes it."""
+    t = FakeTransport([err(503, "SERVICE_UNAVAILABLE"),
+                       Response(200, {"results": [{"ok": True}]})])
+    c = Client(make_settings(dry_run=False, live_trading=True), transport=t,
+               sleep=lambda s: None)
+    c.place_batch([{"exchangeId": "1", "side": "yes", "action": "buy",
+                    "quantity": 1, "price": 0.5}])
+    keys = {call["body"]["idempotencyKey"] for call in t.calls}
+    assert len(t.calls) == 2 and len(keys) == 1

@@ -261,3 +261,65 @@ def test_unmanaged_order_does_not_satisfy_a_desire():
 def test_none_means_manage_everything():
     p = plan_orders([], [lo(order_id=5)], rm(), state(), managed_order_ids=None)
     assert len(p.cancels) == 1
+
+
+# ------------------------------------------------------ executor batching ---
+
+class _StubClient:
+    def __init__(self, dry=False):
+        from sigbot.config import Settings
+        self.s = Settings(base_url="x", recon_key="r", exec_key="e",
+                          dry_run=dry, live_trading=not dry)
+        self.batches = []
+        self.singles = []
+        self.cancelled = []
+
+    def place_batch(self, orders, idempotency_key=None):
+        self.batches.append(orders)
+        return {"results": [{"ok": True, "index": i} for i in range(len(orders))]}
+
+    def place_order(self, *a, **k):
+        self.singles.append(a)
+        return {}
+
+    def cancel_order(self, oid):
+        self.cancelled.append(oid)
+
+
+def test_executor_batches_placements():
+    from sigbot.executor import Executor
+    cl = _StubClient()
+    places = [d(exchange_id=str(i), price=0.50) for i in range(120)]
+    plan = Plan(cancels=[], places=places, keeps=[], vetoed=[])
+    out = Executor(cl, rm()).apply(plan)
+    assert len(cl.batches) == 3            # 50 + 50 + 20
+    assert out["placed"] == 120
+    assert out["requests"] == 3            # not 120
+    assert not cl.singles
+
+
+def test_executor_single_place_when_only_one():
+    from sigbot.executor import Executor
+    cl = _StubClient()
+    plan = Plan(cancels=[], places=[d()], keeps=[], vetoed=[])
+    Executor(cl, rm()).apply(plan)
+    assert len(cl.singles) == 1 and not cl.batches
+
+
+def test_executor_dry_run_places_nothing():
+    from sigbot.executor import Executor
+    cl = _StubClient(dry=True)
+    plan = Plan(cancels=[lo()], places=[d(), d(price=0.4)], keeps=[], vetoed=[])
+    out = Executor(cl, rm()).apply(plan)
+    assert out["dry_run"] and out["placed"] == 0
+    assert not cl.batches and not cl.singles and not cl.cancelled
+    assert len(out["would_place"]) == 2
+
+
+def test_executor_cancels_before_placing():
+    from sigbot.executor import Executor
+    cl = _StubClient()
+    plan = Plan(cancels=[lo(order_id=3)], places=[d(), d(price=0.4)],
+                keeps=[], vetoed=[])
+    Executor(cl, rm()).apply(plan)
+    assert cl.cancelled == [3]

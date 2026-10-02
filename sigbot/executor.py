@@ -124,13 +124,17 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
 class Executor:
     """Applies a Plan. Respects the dry-run latches via the client."""
 
+    BATCH_SIZE = 50
+
     def __init__(self, client: Client, risk: RiskManager):
         self.client = client
         self.risk = risk
 
-    def apply(self, plan: Plan, *, dry_run: bool | None = None) -> dict:
+    def apply(self, plan: Plan, *, dry_run: bool | None = None,
+              use_batch: bool = True) -> dict:
         dry = self.client.s.dry_run if dry_run is None else dry_run
-        result = {"cancelled": 0, "placed": 0, "errors": [], "dry_run": dry}
+        result = {"cancelled": 0, "placed": 0, "errors": [], "dry_run": dry,
+                  "requests": 0}
         if dry:
             result["would_cancel"] = [o.order_id for o in plan.cancels]
             result["would_place"] = [
@@ -144,6 +148,7 @@ class Executor:
             try:
                 self.client.cancel_order(lo.order_id)
                 result["cancelled"] += 1
+                result["requests"] += 1
             except (ApiError, DryRunBlocked) as e:
                 # 409 generally means it already filled or closed - not an error.
                 if isinstance(e, ApiError) and e.status == 409:
@@ -151,11 +156,45 @@ class Executor:
                 else:
                     result["errors"].append(f"cancel {lo.order_id}: {e}")
 
-        for d in plan.places:
+        if use_batch and len(plan.places) > 1:
+            result.update(self._place_batched(plan.places, result))
+        else:
+            for d in plan.places:
+                try:
+                    self.client.place_order(d.exchange_id, d.side, d.action,
+                                            d.quantity, d.price)
+                    result["placed"] += 1
+                    result["requests"] += 1
+                except (ApiError, DryRunBlocked) as e:
+                    result["errors"].append(f"place {d.exchange_id}@{d.price}: {e}")
+        return result
+
+    def _place_batched(self, places: list[DesiredOrder], result: dict) -> dict:
+        """
+        Batch placement. Cuts a 229-order cycle from ~238 requests to ~14, which
+        is the difference between quoting on live prices and quoting on prices
+        that moved several minutes ago.
+        """
+        for i in range(0, len(places), self.BATCH_SIZE):
+            chunk = places[i:i + self.BATCH_SIZE]
+            payload = [{"exchangeId": d.exchange_id, "side": d.side,
+                        "action": d.action, "quantity": d.quantity,
+                        "price": d.price} for d in chunk]
             try:
-                self.client.place_order(d.exchange_id, d.side, d.action,
-                                        d.quantity, d.price)
-                result["placed"] += 1
+                resp = self.client.place_batch(payload)
+                result["requests"] += 1
+                rows = resp.get("results", []) if isinstance(resp, dict) else []
+                if rows:
+                    ok = sum(1 for r in rows if r.get("ok"))
+                    result["placed"] += ok
+                    for r in rows:
+                        if not r.get("ok"):
+                            data = r.get("data") or {}
+                            result["errors"].append(
+                                f"batch item {r.get('index')}: "
+                                f"{data.get('code', r.get('status'))}")
+                else:
+                    result["placed"] += len(chunk)
             except (ApiError, DryRunBlocked) as e:
-                result["errors"].append(f"place {d.exchange_id}@{d.price}: {e}")
+                result["errors"].append(f"batch {i // self.BATCH_SIZE}: {e}")
         return result

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
 import uuid
@@ -34,6 +35,17 @@ RETRYABLE_CODES = {
     "REQUEST_IN_FLIGHT",
     "INTERNAL_ERROR",
 }
+
+
+def _q(value, safe: str = "") -> str:
+    """
+    Percent-encode a third-party value before it reaches a URL.
+
+    Exchange ids and pagination cursors come from the venue. urllib passes them
+    through verbatim, so an id like `../../account` or `36?tournamentId=EVIL&x=`
+    would redirect the request or inject a competing query parameter.
+    """
+    return urllib.parse.quote(str(value), safe=safe)
 
 
 class ApiError(RuntimeError):
@@ -172,7 +184,7 @@ class Client:
         while True:
             p = f"/orders?status=open&limit={limit}"
             if cursor:
-                p += f"&cursor={cursor}"
+                p += f"&cursor={_q(cursor)}"
             d = self.get(p)
             out.extend(d.get("data", []))
             pg = d.get("pagination", {}) or {}
@@ -187,7 +199,7 @@ class Client:
     def fills(self, limit: int = 200, cursor: str | None = None) -> dict:
         p = f"/tournaments/{self.s.tournament_slug}/portfolio/fills?limit={limit}"
         if cursor:
-            p += f"&cursor={cursor}"
+            p += f"&cursor={_q(cursor)}"
         return self.get(p)
 
     def prices(self, exchange_ids: list[str]) -> dict[str, dict]:
@@ -195,21 +207,21 @@ class Client:
         out: dict[str, dict] = {}
         for i in range(0, len(exchange_ids), 100):
             chunk = exchange_ids[i:i + 100]
-            d = self.get(f"/exchanges/prices?ids={','.join(chunk)}"
+            d = self.get(f"/exchanges/prices?ids={_q(','.join(chunk), safe=',')}"
                          f"&tournamentId={self.s.tournament_id}")
             for q in d.get("data", []):
                 out[str(q["exchangeId"])] = q
         return out
 
     def orderbook(self, exchange_id: str, depth: int = 20) -> dict:
-        return self.get(f"/exchanges/{exchange_id}/orderbook"
+        return self.get(f"/exchanges/{_q(exchange_id)}/orderbook"
                         f"?tournamentId={self.s.tournament_id}&depth={depth}")
 
     def trades(self, exchange_id: str, limit: int = 200, since: str | None = None) -> list[dict]:
-        p = (f"/exchanges/{exchange_id}/trades"
+        p = (f"/exchanges/{_q(exchange_id)}/trades"
              f"?tournamentId={self.s.tournament_id}&limit={limit}")
         if since:
-            p += f"&from={since}"
+            p += f"&from={_q(since)}"
         return self.get(p).get("data", [])
 
     # NOTE: price-history is deliberately NOT exposed. It returns empty data while

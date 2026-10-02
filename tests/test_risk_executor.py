@@ -410,3 +410,16 @@ def test_executor_counts_failed_batch_items_as_errors_not_placed():
     assert out["placed"] == 1
     assert out["placed_order_ids"] == [1]
     assert len(out["errors"]) == 1
+
+
+def test_batch_with_unrecognised_response_does_not_claim_success():
+    """Failing open here would overstate placements and lose order ids."""
+    from sigbot.executor import Executor
+
+    class C(_StubClient):
+        def place_batch(self, orders, idempotency_key=None):
+            return {"unexpected": True}
+
+    out = Executor(C(), rm()).apply(Plan([], [d(), d(price=0.4)], [], []))
+    assert out["placed"] == 0
+    assert out["errors"]

@@ -224,7 +224,11 @@ class Executor:
                                 f"batch item {r.get('index')}: "
                                 f"{data.get('code', r.get('status'))}")
                 else:
-                    result["placed"] += len(chunk)
+                    # Unrecognised response shape: do NOT assume success. This
+                    # feeds ownership tracking, so failing open here would both
+                    # overstate placements and lose order ids.
+                    result["errors"].append(
+                        f"batch {i // self.BATCH_SIZE}: unrecognised response shape")
             except (ApiError, DryRunBlocked) as e:
                 result["errors"].append(f"batch {i // self.BATCH_SIZE}: {e}")
         return result

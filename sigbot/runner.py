@@ -53,19 +53,23 @@ def save_state(st: dict) -> None:
         json.dump(st, f)
 
 
-def fetch_markets(client: Client) -> list[dict]:
+def fetch_markets(client: Client, max_pages: int = 20) -> list[dict]:
+    """Paginate markets with a hard page cap and a stuck-cursor guard, so a
+    server returning a constant cursor cannot wedge the loop forever."""
     out, cursor = [], None
-    while True:
+    for _ in range(max_pages):
         p = (f"/markets?limit=100&status=open"
              f"&tournamentId={client.s.tournament_id}")
         if cursor:
             p += f"&cursor={cursor}"
         d = client.get(p)
         out.extend(d.get("data", []))
-        pg = d.get("pagination", {})
-        if not pg.get("hasMore"):
+        pg = d.get("pagination", {}) or {}
+        nxt = pg.get("nextCursor")
+        if not pg.get("hasMore") or not nxt or nxt == cursor:
             return out
-        cursor = pg.get("nextCursor")
+        cursor = nxt
+    return out
 
 
 def build_races(markets: list[dict], positions: list[dict]) -> tuple[dict, dict]:

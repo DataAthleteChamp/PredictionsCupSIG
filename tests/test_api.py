@@ -284,3 +284,30 @@ def test_open_orders_stops_on_repeated_cursor():
     c = Client(make_settings(), transport=t, sleep=lambda s: None)
     c.open_orders()
     assert len(t.calls) <= 3
+
+
+# ------------------------------------------------------- URL encoding -------
+
+def test_exchange_id_cannot_escape_the_path():
+    """Exchange ids come from the venue; a malicious one must not redirect us."""
+    t = FakeTransport([Response(200, {}), Response(200, {"data": []})])
+    c = Client(make_settings(), transport=t, sleep=lambda s: None)
+    c.orderbook("../../account")
+    c.trades("36?tournamentId=EVIL&x=")
+    assert "/exchanges/../../account/" not in t.calls[0]["url"]
+    assert "%2F" in t.calls[0]["url"] or ".." not in t.calls[0]["url"]
+    assert "EVIL" not in t.calls[1]["url"].split("tournamentId=")[1].split("&")[0]
+
+
+def test_cursor_is_encoded():
+    t = FakeTransport([Response(200, {"data": [], "pagination": {}})])
+    c = Client(make_settings(), transport=t, sleep=lambda s: None)
+    c.fills(cursor="a&b=c")
+    assert "a&b=c" not in t.calls[0]["url"]
+
+
+def test_bulk_price_ids_keep_their_separator():
+    t = FakeTransport([Response(200, {"data": []})])
+    c = Client(make_settings(), transport=t, sleep=lambda s: None)
+    c.prices(["1", "2", "3"])
+    assert "ids=1,2,3" in t.calls[0]["url"]

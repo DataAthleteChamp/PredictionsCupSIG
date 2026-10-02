@@ -1,0 +1,102 @@
+"""Configuration. All secrets come from the environment, never from source."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+
+TOURNAMENT_SLUG = "midterm-elections"
+TOURNAMENT_ID = "bda92870-621e-47b0-bc3c-3602c5c26f55"
+
+TICK = 0.005
+MIN_PRICE = 0.005
+MAX_PRICE = 0.995
+START_BALANCE = 100_000.0
+
+# Trading closes 2026-11-04 12:00 ET. Positions settle weeks later.
+TRADING_CLOSE_UTC = "2026-11-04T17:00:00+00:00"
+
+
+def _f(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class RiskLimits:
+    """Hard caps. The allocator enforces these; strategies cannot override them."""
+
+    max_deployed_fraction: float = 0.90      # never commit the whole stack
+    max_per_market_fraction: float = 0.05
+    max_position_shares: int = 50_000
+    max_drawdown_fraction: float = 0.20      # kill switch
+    # Measured: both tail buckets markout negative. Do not buy inside these.
+    no_buy_below: float = 0.15
+    no_buy_above: float = 0.95
+
+    def __post_init__(self) -> None:
+        if not 0 < self.max_deployed_fraction <= 1:
+            raise ValueError("max_deployed_fraction must be in (0, 1]")
+        if not 0 < self.max_per_market_fraction <= 1:
+            raise ValueError("max_per_market_fraction must be in (0, 1]")
+        if not 0 <= self.no_buy_below < self.no_buy_above <= 1:
+            raise ValueError("no-buy band is inverted")
+
+
+@dataclass(frozen=True)
+class StrategyBudget:
+    """Fraction of capital each strategy may deploy. Must sum to 1."""
+
+    ladder: float = 0.35
+    relvalue: float = 0.25
+    reserve: float = 0.40
+
+    def validate(self) -> None:
+        total = self.ladder + self.relvalue + self.reserve
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(f"budgets must sum to 1.0, got {total}")
+
+
+@dataclass(frozen=True)
+class Settings:
+    base_url: str
+    recon_key: str
+    exec_key: str
+    tournament_id: str = TOURNAMENT_ID
+    tournament_slug: str = TOURNAMENT_SLUG
+
+    # Two independent latches. BOTH must be set for a live order to leave the process.
+    dry_run: bool = True
+    live_trading: bool = False
+
+    rate_limit_per_min: float = 30.0         # measured safe ~38/min; stay under
+    max_concurrency: int = 3                 # 6 workers produced 429s
+
+    limits: RiskLimits = field(default_factory=RiskLimits)
+    budgets: StrategyBudget = field(default_factory=StrategyBudget)
+
+    @property
+    def trading_enabled(self) -> bool:
+        """Live orders require dry_run off AND live_trading on."""
+        return (not self.dry_run) and self.live_trading
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        base = os.environ.get("SIG_BASE_URL", "").rstrip("/")
+        recon = os.environ.get("SIG_RECON_KEY", "")
+        ex = os.environ.get("SIG_EXEC_KEY", "")
+        if not base:
+            raise RuntimeError("SIG_BASE_URL is not set")
+        if not recon:
+            raise RuntimeError("SIG_RECON_KEY is not set")
+        s = cls(
+            base_url=base,
+            recon_key=recon,
+            exec_key=ex,
+            dry_run=os.environ.get("DRY_RUN", "true").lower() != "false",
+            live_trading=os.environ.get("LIVE_TRADING", "false").lower() == "true",
+            rate_limit_per_min=_f("SIG_RATE_LIMIT_PER_MIN", 30.0),
+        )
+        s.budgets.validate()
+        return s

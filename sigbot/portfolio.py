@@ -88,7 +88,89 @@ class RacePosition:
 
     @property
     def is_risk_free(self) -> bool:
+        """
+        DEPRECATED NAME - kept only so nothing silently changes meaning.
+        Use `is_conditionally_locked`. This is NOT risk-free: see
+        `worst_case_floor` for what a refund does to it.
+        """
+        return self.is_conditionally_locked
+
+    @property
+    def is_conditionally_locked(self) -> bool:
+        """
+        True when the position pays a non-negative floor *conditional on* every
+        leg settling 0 or 1 and one listed outcome winning.
+
+        It is NOT unconditional. See `worst_case_floor`.
+        """
         return self.enumerable and self.guaranteed_floor > 0
+
+    # --- settlement states beyond "someone wins" --------------------------
+    #
+    # The venue refunds: "A cancelled or N/A outcome refunds the remaining
+    # position instead of choosing a winner. The refund returns the refundable
+    # cost of the held shares." A refund on ONE leg converts a constant payoff
+    # into a directional one:
+    #
+    #   buy R 100@0.40 + D 100@0.50  -> cost 90, "locked" +10
+    #   R refunded at cost, D settles 0 -> payout 40, PnL -50
+    #
+    # So `guaranteed_floor` is a floor over winner-states only. The true worst
+    # case must also consider refunds.
+
+    def payout_if_refunded(self, refunded: tuple[str, ...], winner: str) -> float:
+        """Payout when `refunded` legs return their cost and the rest settle."""
+        total = 0.0
+        for l in self.legs:
+            if l.party in refunded:
+                total += l.cost                 # cost returned, no profit
+            else:
+                total += l.payout_if(winner)
+        return total
+
+    @property
+    def other_wins_floor(self) -> float:
+        """
+        PnL if NO listed outcome wins - an unlisted candidate, a write-in, or a
+        settlement we did not anticipate. Every long leg settles zero.
+
+        This is the tail the 'risk-free' framing ignored: the outcome universe
+        is built from the contracts the venue happens to list, which proves they
+        exist, not that one of them must settle YES.
+        """
+        return self.payout_if("__other__") - self.cost
+
+    @property
+    def worst_case_floor(self) -> float:
+        """
+        Minimum PnL over winner-states AND single-leg refund states.
+
+        A refunded leg cannot also be the winner, so refund states are evaluated
+        against the remaining outcomes only. `guaranteed_floor` assumes refunds
+        never happen, which the venue's settlement rules contradict:
+        "A cancelled or N/A outcome refunds the remaining position."
+
+        Does NOT include `other_wins_floor`, which is reported separately so the
+        two very different tails are not conflated.
+        """
+        if not self.enumerable:
+            return -self.cost
+        worst = self.guaranteed_floor
+        for refunded in {l.party for l in self.legs}:
+            others = [w for w in self.outcomes if w != refunded]
+            for w in others:
+                worst = min(worst, self.payout_if_refunded((refunded,), w) - self.cost)
+            # The genuinely dangerous case: the leg that WOULD have won is the
+            # one refunded, so it returns cost instead of 1 and nothing else
+            # pays. This is how a "locked" pair becomes a directional loss.
+            worst = min(worst,
+                        self.payout_if_refunded((refunded,), "__none__") - self.cost)
+        return worst
+
+    @property
+    def is_unconditionally_locked(self) -> bool:
+        """Non-negative even if any single leg is refunded."""
+        return self.enumerable and self.worst_case_floor > 0
 
     def max_price_to_lock(self, party: str, quantity: float) -> float | None:
         """
@@ -118,15 +200,25 @@ class RacePosition:
 
 
 def portfolio_floor(races: list[RacePosition]) -> dict:
-    """Aggregate worst case. Races are independent, so floors simply add."""
+    """
+    Aggregate floors. Deterministic floors add across races — this needs no
+    probabilistic independence assumption, only that each race settles on its
+    own terms.
+    """
     total_cost = sum(r.cost for r in races)
     total_floor = sum(r.guaranteed_floor for r in races)
-    risk_free = [r for r in races if r.is_risk_free]
+    locked = [r for r in races if r.is_conditionally_locked]
     return {
         "cost": total_cost,
-        "guaranteed_floor": total_floor,
+        "guaranteed_floor": total_floor,          # winner-states only
+        "worst_case_floor": sum(r.worst_case_floor for r in races),
+        "other_wins_floor": sum(r.other_wins_floor for r in races),
         "best_case": sum(r.best_payout for r in races) - total_cost,
         "n_races": len(races),
-        "n_risk_free": len(risk_free),
-        "risk_free_floor": sum(r.guaranteed_floor for r in risk_free),
+        "n_conditionally_locked": len(locked),
+        "n_risk_free": len(locked),               # back-compat alias
+        "n_unconditionally_locked": sum(1 for r in races
+                                        if r.is_unconditionally_locked),
+        "locked_floor": sum(r.guaranteed_floor for r in locked),
+        "risk_free_floor": sum(r.guaranteed_floor for r in locked),
     }

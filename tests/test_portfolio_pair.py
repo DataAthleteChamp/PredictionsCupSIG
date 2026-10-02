@@ -238,3 +238,85 @@ def test_pair_strategy_will_not_skip_an_unhedgeable_race():
                                  races, {("race", "D"): "77"})
     assert out == []       # no lock price exists, but it is not treated as safe
     assert not races["race"].is_risk_free
+
+
+# ------------------------------------------------- refund / void states -----
+
+def test_refund_breaks_the_lock_even_in_a_two_outcome_race():
+    """
+    If R is refunded and D still settles zero - i.e. R was the winner but its
+    market was cancelled - we get back only R's cost. +10 "locked" becomes -50.
+
+    This is why "risk-free" was the wrong word: the venue's own settlement rules
+    say "a cancelled or N/A outcome refunds the remaining position".
+    """
+    pos = rp(legs=[Leg("R", 100, 0.40), Leg("D", 100, 0.50)])
+    assert pos.is_conditionally_locked               # locked over winner states
+    assert pos.guaranteed_floor == pytest.approx(10.0)
+    # refund is benign when the OTHER leg still wins
+    assert pos.payout_if_refunded(("R",), "D") == pytest.approx(140.0)
+    # but fatal when nothing else pays
+    assert pos.payout_if_refunded(("R",), "__none__") == pytest.approx(40.0)
+    assert pos.worst_case_floor == pytest.approx(-50.0)
+    assert not pos.is_unconditionally_locked
+
+
+def test_holding_only_two_of_three_outcomes_is_already_unhedged():
+    """An Independent winning makes both held legs settle zero."""
+    pos = RacePosition("x", ("R", "D", "I"),
+                       [Leg("R", 100, 0.40), Leg("D", 100, 0.50)])
+    assert pos.guaranteed_floor == pytest.approx(-90.0)
+    assert not pos.is_conditionally_locked
+
+
+def test_refunding_the_winning_leg_destroys_a_fully_covered_lock():
+    """
+    All three outcomes held for 0.95 looks locked at +5. But if the leg that
+    would have won is REFUNDED, it returns cost instead of 1 and nothing else
+    pays - turning +5 into a loss.
+    """
+    pos = RacePosition("x", ("R", "D", "I"),
+                       [Leg("R", 100, 0.40), Leg("D", 100, 0.50),
+                        Leg("I", 100, 0.05)])
+    assert pos.guaranteed_floor == pytest.approx(5.0)
+    assert pos.is_conditionally_locked
+    assert pos.worst_case_floor < 0
+    assert not pos.is_unconditionally_locked
+
+
+def test_other_wins_is_the_tail_the_risk_free_framing_ignored():
+    """The outcome universe lists contracts; it does not prove exhaustiveness."""
+    pos = rp(legs=[Leg("R", 100, 0.40), Leg("D", 100, 0.50)])
+    assert pos.other_wins_floor == pytest.approx(-90.0)   # everything settles 0
+
+
+def test_worst_case_floor_never_exceeds_conditional_floor():
+    import itertools
+    for a, b in itertools.product([0.2, 0.4, 0.6], [0.3, 0.5, 0.7]):
+        pos = rp(legs=[Leg("R", 100, a), Leg("D", 100, b)])
+        assert pos.worst_case_floor <= pos.guaranteed_floor + 1e-9
+
+
+def test_both_legs_refunded_is_breakeven():
+    pos = rp(legs=[Leg("R", 100, 0.40), Leg("D", 100, 0.50)])
+    both = pos.payout_if_refunded(("R", "D"), "R") - pos.cost
+    assert both == pytest.approx(0.0)
+
+
+def test_incomplete_space_worst_case_is_full_cost():
+    pos = RacePosition("race", ("R",), [Leg("R", 100, 0.40)])
+    assert pos.worst_case_floor == pytest.approx(-40.0)
+
+
+def test_portfolio_reports_all_three_floors():
+    a = rp(legs=[Leg("R", 100, 0.40), Leg("D", 100, 0.50)])
+    agg = portfolio_floor([a])
+    assert agg["guaranteed_floor"] == pytest.approx(10.0)      # winner states
+    assert agg["worst_case_floor"] <= agg["guaranteed_floor"]  # refunds included
+    assert agg["other_wins_floor"] == pytest.approx(-90.0)     # nothing pays
+    assert agg["n_unconditionally_locked"] == 0
+
+
+def test_risk_free_alias_still_matches_conditional_lock():
+    pos = rp(legs=[Leg("R", 100, 0.40), Leg("D", 100, 0.50)])
+    assert pos.is_risk_free == pos.is_conditionally_locked

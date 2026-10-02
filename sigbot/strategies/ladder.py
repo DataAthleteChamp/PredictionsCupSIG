@@ -4,13 +4,19 @@ S3 — deep passive ladder. The measured primary strategy.
 Why this one leads:
   * **Zero capital while resting.** Verified: balance == 100,000 − filled cost
     basis exactly, with 1,001 of notional resting. Only fills debit.
-  * **Best measured EV/order-hour** (+0.254 vs +0.013 for joining the touch).
+  * **Best measured EV/order-hour** among the placements we tested.
   * **Fills concentrate overnight** — all observed fills landed 01:23–04:51 ET,
     when the US field is asleep.
 
 The low fill rate (0.025/order-hour) is the *point*: deep orders only fill during
-dislocations, and dislocations revert (median 2 minutes). Measured markout on
-deep fills was +0.0875/share versus −0.0047 for price improvement.
+dislocations, and dislocations revert (median 2 minutes).
+
+On the size of the edge: an earlier version of this docstring claimed deep fills
+marked out at +0.0875/share. That number was an artifact of a frame bug that
+scored NO fill prices against YES mids (see algos.markout). Corrected over 91
+fills, the edge is about **+0.005/share — one tick** — with P(edge>0) = 0.96 at
+1 min and 0.91 at 30 min. It is real but small, and it decays to negative by
+240 min, which is why ExitStrategy exists.
 
 Never improves the touch; never bids into the negative-markout tail.
 """

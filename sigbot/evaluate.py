@@ -1,10 +1,12 @@
 """
 Statistical evaluation of a trading edge.
 
-Why this module exists: we have **3 fills** on the ladder with a raw mean markout
+Why this module exists: we had **3 fills** on the ladder with a raw mean markout
 of +0.0875/share, all clustered in one overnight window. Acting on that number
-would be a mistake, and this module makes the mistake visible rather than
-arguable.
+would have been a mistake twice over -- the sample was far too small, and the
+number itself turned out to be an artifact of a frame bug (algos.markout scored
+NO fill prices against YES mids). This module makes both failure modes visible
+rather than arguable.
 
 Three things it does:
 

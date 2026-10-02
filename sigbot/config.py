@@ -128,3 +128,33 @@ class Settings:
         )
         s.budgets.validate()
         return s
+
+    def risk_banner(self) -> str:
+        """
+        The effective caps, rendered for the startup log.
+
+        A deployment cap once existed only as a shell export in the terminal
+        that launched the bot. The process restarted without it and ran for
+        hours on the 0.90 default while every log line and every mental model
+        said 5%. Nothing crashed, because the per-market and per-strategy
+        budgets bound first -- which is precisely why it went unnoticed.
+
+        Printing the resolved numbers makes a missing override visible in the
+        first line of output rather than discoverable only by reading config.
+        """
+        return (f"caps: deployed<={self.limits.max_deployed_fraction:.1%} "
+                f"per_market<={self.limits.max_per_market_fraction:.1%} "
+                f"budgets(ladder={self.budgets.ladder:.0%},"
+                f"relvalue={self.budgets.relvalue:.0%},"
+                f"sleeve={self.budgets.sleeve:.0%},"
+                f"reserve={self.budgets.reserve:.0%}) "
+                f"max_deployable_by_budget={self.max_deployable_fraction:.1%}")
+
+    @property
+    def max_deployable_fraction(self) -> float:
+        """
+        The binding cap: strategy budgets and the deployment limit are two
+        independent ceilings, and the lower one is what actually applies.
+        """
+        return min(self.limits.max_deployed_fraction, self.budgets.core
+                   + self.budgets.sleeve)

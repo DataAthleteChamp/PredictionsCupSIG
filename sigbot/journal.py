@@ -117,6 +117,44 @@ class OrderJournal:
             "UPDATE orders SET status=?, updated_at=? WHERE order_id=?",
             [(CLOSED, time.time(), i) for i in ids])
 
+    def adopt(self, live_orders: Iterable[dict], *,
+              strategy: str = "adopted") -> int:
+        """
+        Take ownership of orders that are open on the account but absent from
+        the journal.
+
+        The executor deliberately refuses to cancel what it did not record, so
+        an order loses its owner permanently if the journal is lost or predates
+        the order. Those orphans then rest at whatever price the config held
+        when they were placed, immune to every later retune.
+
+        This is the explicit, operator-invoked escape hatch. It is only sound
+        when the account is single-tenant -- that is, when no other process or
+        person places orders on it. Never call it automatically: that would
+        silently convert "do not touch what is not ours" into "claim
+        everything", which is the exact failure the ownership rule prevents.
+
+        Returns the number of orders newly adopted.
+        """
+        n = 0
+        for o in live_orders:
+            oid = o.get("id")
+            if oid is None:
+                continue
+            oid = int(oid)
+            if self.con.execute("SELECT 1 FROM orders WHERE order_id=?",
+                                (oid,)).fetchone():
+                continue                       # already ours, in any status
+            now = time.time()
+            self.con.execute(
+                "INSERT OR IGNORE INTO orders VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (self.new_key("adopt"), str(o.get("exchangeId")),
+                 o.get("side"), o.get("action"),
+                 float(o.get("priceLimit") or 0.0), int(o.get("quantity") or 0),
+                 strategy, PLACED, oid, now, now))
+            n += 1
+        return n
+
     # ------------------------------------------------------------- reading --
 
     def _rows(self, where: str, args: tuple = ()) -> list[JournalEntry]:

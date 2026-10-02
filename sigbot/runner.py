@@ -279,6 +279,10 @@ def main() -> None:
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--interval", type=int, default=300)
     ap.add_argument("--no-polymarket", action="store_true")
+    ap.add_argument("--adopt-orphans", action="store_true",
+                    help="Take ownership of open orders missing from the "
+                         "journal so the executor can reprice them. Only safe "
+                         "on a single-tenant account.")
     args = ap.parse_args()
 
     s = Settings.from_env()
@@ -288,11 +292,16 @@ def main() -> None:
     journal = OrderJournal()
     print(f"sigbot starting | trading_enabled={s.trading_enabled} "
           f"(DRY_RUN and LIVE_TRADING latches) | interval={args.interval}s")
+    print(f"  {s.risk_banner()}")
 
     # Resolve anything a previous process left pending before trading again.
     rec = recover(journal, client, dry_run=not s.trading_enabled)
     if rec["pending"]:
         print(f"  recovery: {rec}")
+
+    if args.adopt_orphans:
+        n = journal.adopt(client.open_orders())
+        print(f"  adopted {n} orphaned order(s) into the journal")
 
     while True:
         try:

@@ -32,8 +32,31 @@ from .base import MarketView
 
 @dataclass(frozen=True)
 class LadderConfig:
-    # Offsets below mid, in probability points. 20 ticks = 0.10.
-    offsets: tuple[float, ...] = (0.08, 0.15)
+    # Offsets below mid, in probability points. 1 tick = 0.005.
+    #
+    # Measured EV/order-hour by depth (corrected markout x Cont-de Larrard
+    # fill rate, 10k bootstrap over our own fills):
+    #
+    #     depth below mid   n    EV/order-hr   95% CI            P(best)
+    #     inside/at mid    30    +0.00035      [-0.0106,+0.0122]   0.9%
+    #     0-1 ticks       148    +0.00821      [+0.0028,+0.0132]   2.9%
+    #     2-3 ticks        19    +0.01633      [+0.0085,+0.0228]  87.3%
+    #     4-6 ticks         4    +0.00281      [-0.0143,+0.0200]   8.8%
+    #     13+ ticks         6    +0.00364      [+0.0033,+0.0040]   0.0%
+    #
+    # The optimum is 2-3 ticks below mid. With a 2.88-tick average spread that
+    # sits just below the best bid -- joining the queue rather than leading it,
+    # which is the same conclusion reached earlier by a different route.
+    #
+    # The previous (0.08, 0.15) offsets were 16 and 30 ticks deep, where the
+    # model predicts 0.069 and 0.002 fills/order-hour: the far rung filled
+    # roughly once per 500 order-hours. Those offsets had 0% bootstrap
+    # probability of being EV-optimal.
+    #
+    # A deep rung is retained because resting costs no capital and deep fills
+    # carry a much larger per-fill markout (+0.070/share) from dislocation
+    # reversion, which is uncorrelated with the shallow rungs' edge.
+    offsets: tuple[float, ...] = (0.015, 0.03, 0.10)
     # Only quote markets whose mid sits in this band.
     min_mid: float = 0.20
     max_mid: float = 0.85

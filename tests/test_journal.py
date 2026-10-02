@@ -243,3 +243,69 @@ def test_ownership_comes_from_the_journal_not_the_account(tmp_path):
     j.record_placed("mine", 111)
     assert j.managed_order_ids() == {111}          # 999 (manual) is absent
     j.close()
+
+
+# ------------------------------------------------------------- adoption ---
+
+def _live(oid, ex="7", px=0.3, qty=10):
+    return {"id": oid, "exchangeId": ex, "side": "yes", "action": "buy",
+            "priceLimit": px, "quantity": qty}
+
+
+def test_adopt_takes_ownership_of_orphans(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    assert j.managed_order_ids() == set()
+    assert j.adopt([_live(11), _live(12)]) == 2
+    assert j.managed_order_ids() == {11, 12}
+
+
+def test_adopt_is_idempotent(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    j.adopt([_live(11)])
+    assert j.adopt([_live(11), _live(12)]) == 1      # only the new one
+    assert j.managed_order_ids() == {11, 12}
+
+
+def test_adopt_does_not_resurrect_closed_orders(tmp_path):
+    """A filled order must not be re-adopted as if it were still open."""
+    j = OrderJournal(str(tmp_path / "j.db"))
+    k = j.record_intent("k1", "7", "yes", "buy", 0.3, 10, "ladder")
+    j.record_placed(k, 99)
+    j.record_closed([99])
+    assert j.adopt([_live(99)]) == 0
+    assert 99 not in j.managed_order_ids()
+
+
+def test_adopt_preserves_order_details(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    j.adopt([_live(11, ex="42", px=0.125, qty=77)])
+    row = j._rows("WHERE order_id=11")[0]
+    assert (row.exchange_id, row.price, row.quantity) == ("42", 0.125, 77)
+    assert row.strategy == "adopted"
+
+
+def test_adopt_skips_orders_without_an_id(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    assert j.adopt([{"exchangeId": "7", "side": "yes", "action": "buy"}]) == 0
+
+
+def _pstate():
+    from sigbot.risk import PortfolioState
+    return PortfolioState(balance=99_000.0, equity=100_000.0,
+                          cost_basis=1_000.0, peak_equity=100_000.0,
+                          positions={}, deployed_by_strategy={})
+
+
+def test_adopted_orders_become_cancellable_by_the_executor(tmp_path):
+    """The whole point: adoption must make the executor willing to cancel."""
+    from sigbot.executor import LiveOrder, plan_orders
+    j = OrderJournal(str(tmp_path / "j.db"))
+    live = [LiveOrder.from_api(_live(11, px=0.08))]
+    risk = RiskManager(Settings(base_url="https://x", recon_key="r",
+                                exec_key="e"))
+    before = plan_orders([], live, risk, _pstate(), managed_order_ids=set())
+    assert before.cancels == []                      # unowned: left alone
+    j.adopt([_live(11, px=0.08)])
+    after = plan_orders([], live, risk, _pstate(),
+                        managed_order_ids=j.managed_order_ids())
+    assert [o.order_id for o in after.cancels] == [11]

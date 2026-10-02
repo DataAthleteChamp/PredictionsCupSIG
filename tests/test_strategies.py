@@ -224,3 +224,30 @@ def test_barbell_budgets_validate():
     StrategyBudget().validate()
     with pytest.raises(ValueError):
         StrategyBudget(ladder=0.1, relvalue=0.1, sleeve=0.5, reserve=0.3).validate()
+
+
+# ------------------------------------------------- ladder depth retuning ---
+
+def test_ladder_quotes_near_the_measured_ev_optimum():
+    """
+    Bootstrap put 2-3 ticks below mid at 87% probability of being the best
+    depth. The shallowest rung must land in that neighbourhood, not 16+ ticks
+    out where the fill rate collapses.
+    """
+    from sigbot.strategies.ladder import LadderConfig
+    shallowest = min(LadderConfig().offsets)
+    assert 0.010 <= shallowest <= 0.020          # 2-4 ticks
+
+
+def test_ladder_keeps_a_deep_rung_for_dislocations():
+    from sigbot.strategies.ladder import LadderConfig
+    assert max(LadderConfig().offsets) >= 0.05
+
+
+def test_ladder_shallow_rung_still_never_improves_the_touch():
+    """Shallower quoting must not start crossing or leading the book."""
+    s = LadderStrategy()
+    # 2.88-tick spread, the measured average
+    v = view({"1": q(bid=0.4928, ask=0.5072)})
+    for o in s.desired(v):
+        assert o.price < 0.4928

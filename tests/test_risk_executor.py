@@ -525,3 +525,49 @@ def test_hysteresis_never_matches_an_unmanaged_order():
     p = plan_orders([d(price=0.502, quantity=100)], live, rm(), state(),
                     managed_order_ids=set())
     assert len(p.places) == 1 and p.cancels == []
+
+
+# ------------------------------------------- effective-cap transparency ---
+
+def test_env_override_is_read_for_the_deployment_cap(monkeypatch):
+    """
+    Regression: the live bot ran on the 0.90 default because the 5% cap was
+    only ever a shell export. The override must be read from the environment.
+    """
+    monkeypatch.setenv("SIG_BASE_URL", "https://x")
+    monkeypatch.setenv("SIG_RECON_KEY", "r")
+    monkeypatch.setenv("SIG_MAX_DEPLOYED_FRACTION", "0.05")
+    s = Settings.from_env()
+    assert s.limits.max_deployed_fraction == 0.05
+
+
+def test_deployment_cap_falls_back_to_the_documented_default(monkeypatch):
+    monkeypatch.setenv("SIG_BASE_URL", "https://x")
+    monkeypatch.setenv("SIG_RECON_KEY", "r")
+    monkeypatch.delenv("SIG_MAX_DEPLOYED_FRACTION", raising=False)
+    assert Settings.from_env().limits.max_deployed_fraction == 0.90
+
+
+def test_risk_banner_shows_the_numbers_that_actually_bind():
+    s = settings(limits=RiskLimits(max_deployed_fraction=0.05,
+                                   max_per_market_fraction=0.01))
+    b = s.risk_banner()
+    assert "deployed<=5.0%" in b
+    assert "per_market<=1.0%" in b
+
+
+def test_binding_cap_is_the_lower_of_limit_and_budgets():
+    tight = settings(limits=RiskLimits(max_deployed_fraction=0.05))
+    assert tight.max_deployable_fraction == 0.05        # limit binds
+    loose = settings(limits=RiskLimits(max_deployed_fraction=0.90))
+    assert abs(loose.max_deployable_fraction - 0.60) < 1e-9   # budgets bind
+
+
+def test_deployment_cap_actually_vetoes_at_the_limit():
+    risk = RiskManager(settings(
+        limits=RiskLimits(max_deployed_fraction=0.05,
+                          max_per_market_fraction=0.05)))
+    st = state(cost_basis=4_990.0, equity=100_000.0)
+    v = risk.check(st, exchange_id="1", action="buy", price=0.5,
+                   quantity=100, strategy="ladder")
+    assert v is not None and "total deployment cap" in v.reason

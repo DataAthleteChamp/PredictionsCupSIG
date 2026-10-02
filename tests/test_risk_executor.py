@@ -225,3 +225,39 @@ def test_drawdown_and_deployment_fractions():
 
 def test_drawdown_is_zero_when_at_peak():
     assert state(equity=100_000.0, peak_equity=100_000.0).drawdown == 0.0
+
+
+# ------------------------------------------------- managed-order scoping ----
+
+def test_unmanaged_orders_are_never_cancelled():
+    """The bot must not touch manual experiments or another process's orders."""
+    external = lo(order_id=999, price=0.30)
+    p = plan_orders([], [external], rm(), state(), managed_order_ids=set())
+    assert p.cancels == []
+    assert p.is_noop
+
+
+def test_managed_orders_are_cancelled_when_not_desired():
+    mine = lo(order_id=7, price=0.30)
+    p = plan_orders([], [mine], rm(), state(), managed_order_ids={7})
+    assert [c.order_id for c in p.cancels] == [7]
+
+
+def test_mixed_managed_and_unmanaged():
+    mine, theirs = lo(order_id=1, price=0.30), lo(order_id=2, price=0.30)
+    p = plan_orders([], [mine, theirs], rm(), state(), managed_order_ids={1})
+    assert [c.order_id for c in p.cancels] == [1]
+
+
+def test_unmanaged_order_does_not_satisfy_a_desire():
+    """An identical external order must not stop us placing our own."""
+    external = lo(order_id=42, price=0.50, quantity=100)
+    p = plan_orders([d(price=0.50, quantity=100)], [external], rm(), state(),
+                    managed_order_ids=set())
+    assert len(p.places) == 1
+    assert p.cancels == []
+
+
+def test_none_means_manage_everything():
+    p = plan_orders([], [lo(order_id=5)], rm(), state(), managed_order_ids=None)
+    assert len(p.cancels) == 1

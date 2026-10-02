@@ -75,13 +75,19 @@ class Plan:
 
 
 def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
-                risk: RiskManager, state: PortfolioState) -> Plan:
+                risk: RiskManager, state: PortfolioState,
+                managed_order_ids: set[int] | None = None) -> Plan:
     """
     Pure diff. No I/O, fully testable.
 
     An existing order is KEPT when an identical (exchange, side, action, price)
     order is desired with the same quantity. A quantity change means cancel and
     replace, because the venue has no amend operation.
+
+    `managed_order_ids` scopes what the bot is allowed to cancel. Orders placed
+    outside the bot (manual experiments, another process) are left strictly
+    alone. Pass None to manage everything — only safe when the bot is the sole
+    writer on the account.
     """
     live_by_key: dict[tuple, list[LiveOrder]] = {}
     for lo in live:
@@ -92,13 +98,17 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
     vetoed: list[tuple[DesiredOrder, str]] = []
     matched_ids: set[int] = set()
 
+    def manageable(o: LiveOrder) -> bool:
+        return managed_order_ids is None or o.order_id in managed_order_ids
+
     for d in desired:
         veto = risk.check(state, exchange_id=d.exchange_id, action=d.action,
                           price=d.price, quantity=d.quantity, strategy=d.strategy)
         if veto is not None:
             vetoed.append((d, veto.reason))
             continue
-        candidates = [lo for lo in live_by_key.get(d.key, []) if lo.order_id not in matched_ids]
+        candidates = [lo for lo in live_by_key.get(d.key, [])
+                      if lo.order_id not in matched_ids and manageable(lo)]
         exact = next((lo for lo in candidates if lo.quantity == d.quantity), None)
         if exact is not None:
             matched_ids.add(exact.order_id)
@@ -106,7 +116,8 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
         else:
             places.append(d)
 
-    cancels = [lo for lo in live if lo.order_id not in matched_ids]
+    cancels = [lo for lo in live
+               if lo.order_id not in matched_ids and manageable(lo)]
     return Plan(cancels=cancels, places=places, keeps=keeps, vetoed=vetoed)
 
 

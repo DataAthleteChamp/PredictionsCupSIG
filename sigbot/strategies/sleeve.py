@@ -18,6 +18,43 @@ ticket, and it is the only place convexity comes without paying the premium.
 
 If no such market exists, this strategy correctly returns nothing. An empty
 sleeve is the right answer when the edge is absent.
+
+---
+
+MEASURED 2026-10-02, all 228 crosswalked markets, SIG mid vs live Polymarket
+CLOB anchor. This is the full bias curve, not just the deep tail:
+
+    SIG mid band      n   median SIG/Poly   SIG>Poly   sign p
+      0.00-0.05      15        1.95x          15/15    6.1e-05
+      0.05-0.08      26        2.35x          26/26      3e-08
+      0.08-0.20      31        1.37x          30/31      3e-08
+      0.20-0.40      33        1.08x          29/33    1.1e-05
+      0.40-0.60      17        1.00x           9/17       1.0
+      0.60-0.80      33        0.98x           7/33     0.0013
+      0.80-1.00      73        0.97x           1/73    1.6e-20
+
+Two things follow, and together they close the tournament question.
+
+First, the overpricing is not confined to deep longshots. The 0.08-0.20 band
+-- proposed in the tournament-theory work as the "tax-free" place to buy
+convexity -- is overpriced 1.37x in 30 of 31 markets. That instrument does not
+exist on this venue.
+
+Second, the only band SIG prices fairly is 0.40-0.60 (median 1.00, sign test
+p=1.0, 9/17 -- indistinguishable from no bias). A near-even contract pays about
+2x. Reaching the podium needs 7x in a single settlement, so the contract must
+be priced at or below 1/7 = 0.143, which is inside the taxed region. There is
+no way around it here: the venue has no parlay product, no leverage, and every
+contract settles on the same day, so nothing can be compounded.
+
+Buying the required convexity therefore costs a 1.37x-2.35x markup, which
+turns a 10% goal probability into 4-7% while committing ~70% of capital. That
+is precisely the reversal condition the tournament analysis set for itself, so
+the sleeve stays empty by evidence rather than by accident.
+
+Mirrored: the same curve is why selling tails is our validated edge, and why
+the 0.80-1.00 band (0.97x, 1 of 73 above anchor, p=1.6e-20) is the strongest
+signal on the board -- those are the same trade seen from the other side.
 """
 from __future__ import annotations
 

@@ -26,6 +26,7 @@ from .api import ApiError, Client
 from .config import Settings
 from .executor import Executor, LiveOrder, plan_orders
 from .fair import Crosswalk, FairValueEngine, clob_midpoints, sig_key
+from .journal import OrderJournal, recover
 from .portfolio import Leg, RacePosition, portfolio_floor
 from .risk import PortfolioState, RiskManager
 from .strategies.base import MarketView, Quote
@@ -48,9 +49,20 @@ def load_state() -> dict:
 
 
 def save_state(st: dict) -> None:
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    with open(STATE_PATH, "w") as f:
+    """
+    Atomic write. Truncating the real file and then writing leaves a corrupt or
+    empty file if the process dies between the two, and load_state would then
+    silently reset peak_equity - disarming the drawdown kill switch.
+    """
+    d = os.path.dirname(STATE_PATH)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(st, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, STATE_PATH)
 
 
 def fetch_markets(client: Client, max_pages: int = 20) -> list[dict]:
@@ -89,12 +101,18 @@ def build_races(markets: list[dict], positions: list[dict]) -> tuple[dict, dict]
         if not mt:
             continue
         race = mt.group(2)
-        rp = races.setdefault(race, RacePosition(race, tuple(sorted(universe[race])), []))
+        outcomes = tuple(sorted(universe[race]))
+        # A race whose outcome space we cannot fully enumerate is NOT safe to
+        # treat as hedgeable: a missing outcome is one that cannot lose, so any
+        # floor computed over a partial set is optimistic.
+        rp = races.setdefault(race, RacePosition(race, outcomes, [],
+                                                 complete=len(outcomes) >= 2))
         rp.legs.append(Leg(mt.group(1), float(p["quantity"]), float(p["avgCost"])))
     return races, party_exchange
 
 
 def cycle(client: Client, risk: RiskManager, state: dict, *,
+          journal: OrderJournal | None = None,
           use_polymarket: bool = True, verbose: bool = True) -> dict:
     s = client.s
     markets = fetch_markets(client)
@@ -151,18 +169,21 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
         desired.extend(got)
 
     live = [LiveOrder.from_api(o) for o in client.open_orders()]
-    managed = set(state.get("managed_order_ids", []))
+    live_ids = {o.order_id for o in live}
+    # Ownership comes from the journal, never from the account. An order we did
+    # not record is someone else's and must not be cancelled.
+    managed = (journal.managed_order_ids() if journal
+               else set(state.get("managed_order_ids", [])))
+    if journal:
+        journal.record_closed(managed - live_ids)   # filled or already cancelled
+        managed &= live_ids
     plan = plan_orders(desired, live, risk, pstate, managed_order_ids=managed)
-    result = Executor(client, risk).apply(plan)
+    result = Executor(client, risk, journal=journal).apply(plan)
 
-    # Ownership comes ONLY from ids the executor actually placed. Reading
-    # account-level open orders here would adopt manually-placed orders and
-    # later cancel them, which must never happen.
-    if not result.get("dry_run"):
+    if not result.get("dry_run") and not journal:
+        # Fallback only when no journal is configured.
         newly = {int(i) for i in result.get("placed_order_ids", [])}
-        still_open = {int(o["id"]) for o in live}
-        # Drop ids that are no longer open (filled or cancelled) to bound growth.
-        state["managed_order_ids"] = sorted((managed & still_open) | newly)
+        state["managed_order_ids"] = sorted((managed & live_ids) | newly)
     save_state(state)
 
     if verbose:
@@ -175,6 +196,8 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
         print(f"  fair values: {len(fair)} | strategies: {counts}")
         print(f"  plan: {plan.summary()} | applied: placed={result['placed']} "
               f"cancelled={result['cancelled']} dry={result['dry_run']}")
+        if journal:
+            print(f"  journal: {journal.stats()} managed={len(managed)}")
         for err in result.get("errors", [])[:3]:
             print(f"  [err] {err}")
     return {"equity": equity, "plan": plan, "result": result, "floor": floor}
@@ -191,12 +214,19 @@ def main() -> None:
     client = Client(s)
     risk = RiskManager(s)
     state = load_state()
+    journal = OrderJournal()
     print(f"sigbot starting | trading_enabled={s.trading_enabled} "
           f"(DRY_RUN and LIVE_TRADING latches) | interval={args.interval}s")
 
+    # Resolve anything a previous process left pending before trading again.
+    rec = recover(journal, client, dry_run=not s.trading_enabled)
+    if rec["pending"]:
+        print(f"  recovery: {rec}")
+
     while True:
         try:
-            cycle(client, risk, state, use_polymarket=not args.no_polymarket)
+            cycle(client, risk, state, journal=journal,
+                  use_polymarket=not args.no_polymarket)
         except ApiError as e:
             print(f"[{_now()}] api error: {e}")
         except Exception as e:                      # keep the loop alive

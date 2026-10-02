@@ -14,6 +14,19 @@ from dataclasses import dataclass, field
 from .config import RiskLimits, Settings, START_BALANCE
 
 
+def collateral(action: str, price: float, quantity: int) -> float:
+    """
+    Cash a trade actually ties up, with no leverage.
+
+    A BUY of YES at p costs p per share. A SELL of YES at p from flat is a long
+    NO at (1-p) and costs (1-p) per share. Using price*quantity for both
+    understates short collateral by up to 49x in the cheap tail, which is
+    exactly where RelValueStrategy is designed to sell.
+    """
+    q = abs(quantity)
+    return (price if action == "buy" else (1.0 - price)) * q
+
+
 @dataclass(frozen=True)
 class Veto:
     reason: str
@@ -73,7 +86,7 @@ class RiskManager:
         if quantity <= 0:
             return Veto("non-positive quantity")
 
-        notional = price * quantity
+        notional = collateral(action, price, quantity)
 
         if action == "buy":
             if price < self.limits.no_buy_below:
@@ -84,8 +97,12 @@ class RiskManager:
                             f"{self.limits.no_buy_above}")
 
         cap = self.limits.max_per_market_fraction * state.equity
-        existing = abs(state.positions.get(exchange_id, 0.0)) * price
-        if existing + notional > cap:
+        held = state.positions.get(exchange_id, 0.0)
+        # A trade that REDUCES an existing position is risk-reducing; charging
+        # it against the cap would block exits.
+        reducing = (held > 0 and action == "sell") or (held < 0 and action == "buy")
+        existing = abs(held) * price
+        if not reducing and existing + notional > cap:
             return Veto(f"per-market cap: {existing + notional:.2f} > {cap:.2f}")
 
         if abs(state.positions.get(exchange_id, 0.0)) + quantity > self.limits.max_position_shares:

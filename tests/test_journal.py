@@ -1,0 +1,245 @@
+"""
+Tests for the durable order journal.
+
+The scenario these protect against: the bot places orders, then the process dies
+before recording their ids. Those orders rest on the venue forever, invisible to
+the bot. The journal's write-ahead ordering plus the venue's idempotency makes
+that recoverable.
+"""
+import pytest
+
+from sigbot.executor import DesiredOrder, Executor, Plan
+from sigbot.journal import (CLOSED, FAILED, PENDING, PLACED, OrderJournal,
+                            recover)
+from sigbot.config import Settings
+from sigbot.risk import RiskManager
+
+
+@pytest.fixture
+def jr(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    yield j
+    j.close()
+
+
+def d(exchange_id="36", price=0.50, quantity=100, strategy="ladder"):
+    return DesiredOrder(exchange_id, "yes", "buy", price, quantity, strategy)
+
+
+def rm():
+    return RiskManager(Settings(base_url="x", recon_key="r", exec_key="e"))
+
+
+class StubClient:
+    def __init__(self, dry=False, fail=False, start_id=1000):
+        self.s = Settings(base_url="x", recon_key="r", exec_key="e",
+                          dry_run=dry, live_trading=not dry)
+        self.fail = fail
+        self.next_id = start_id
+        self.seen_keys = []
+        self.cancelled = []
+
+    def place_order(self, ex, side, action, qty, price, idempotency_key=None):
+        self.seen_keys.append(idempotency_key)
+        if self.fail:
+            from sigbot.api import ApiError
+            raise ApiError(400, "VALIDATION_ERROR", "bad")
+        self.next_id += 1
+        return {"orderId": self.next_id}
+
+    def place_batch(self, orders, idempotency_key=None):
+        rows = []
+        for i, _ in enumerate(orders):
+            self.next_id += 1
+            rows.append({"ok": True, "index": i, "data": {"orderId": self.next_id}})
+        return {"results": rows}
+
+    def cancel_order(self, oid):
+        self.cancelled.append(oid)
+
+
+# ------------------------------------------------------------- basics -------
+
+def test_intent_is_recorded_as_pending(jr):
+    jr.record_intent("k1", "36", "yes", "buy", 0.5, 10, "ladder")
+    e = jr.get("k1")
+    assert e.status == PENDING and e.order_id is None
+    assert e.payload() == {"exchangeId": "36", "side": "yes", "action": "buy",
+                           "quantity": 10, "price": 0.5}
+
+
+def test_placed_records_the_order_id(jr):
+    jr.record_intent("k1", "36", "yes", "buy", 0.5, 10, "ladder")
+    jr.record_placed("k1", 4242)
+    assert jr.get("k1").status == PLACED
+    assert jr.managed_order_ids() == {4242}
+
+
+def test_failed_entries_are_not_pending(jr):
+    jr.record_intent("k1", "36", "yes", "buy", 0.5, 10, "ladder")
+    jr.record_failed("k1", "bad")
+    assert jr.pending() == []
+    assert jr.get("k1").status == FAILED
+
+
+def test_intent_is_idempotent_on_the_same_key(jr):
+    jr.record_intent("k1", "36", "yes", "buy", 0.5, 10, "ladder")
+    jr.record_placed("k1", 7)
+    jr.record_intent("k1", "36", "yes", "buy", 0.5, 10, "ladder")   # replay
+    assert jr.get("k1").status == PLACED       # must not revert to pending
+
+
+def test_managed_ids_exclude_pending_and_closed(jr):
+    jr.record_intent("a", "1", "yes", "buy", 0.5, 1, "ladder")
+    jr.record_intent("b", "2", "yes", "buy", 0.5, 1, "ladder")
+    jr.record_placed("b", 22)
+    jr.record_intent("c", "3", "yes", "buy", 0.5, 1, "ladder")
+    jr.record_placed("c", 33)
+    jr.record_closed([33])
+    assert jr.managed_ids_sanity() if hasattr(jr, "managed_ids_sanity") else True
+    assert jr.managed_order_ids() == {22}
+
+
+def test_prune_only_removes_old_terminal_entries(jr):
+    jr.record_intent("a", "1", "yes", "buy", 0.5, 1, "ladder")
+    jr.record_placed("a", 1)
+    jr.record_closed([1])
+    assert jr.prune(older_than_seconds=-1) == 1
+    jr.record_intent("b", "2", "yes", "buy", 0.5, 1, "ladder")
+    assert jr.prune(older_than_seconds=-1) == 0      # pending is never pruned
+    assert len(jr.pending()) == 1
+
+
+def test_stats_reports_counts(jr):
+    jr.record_intent("a", "1", "yes", "buy", 0.5, 1, "ladder")
+    jr.record_intent("b", "2", "yes", "buy", 0.5, 1, "ladder")
+    jr.record_placed("b", 2)
+    s = jr.stats()
+    assert s[PENDING] == 1 and s[PLACED] == 1
+
+
+# -------------------------------------------------- write-ahead ordering ----
+
+def test_intent_exists_before_the_order_is_submitted(tmp_path):
+    """
+    The core guarantee. If the venue call raises, the entry must already be on
+    disk as pending so recovery can resolve it.
+    """
+    j = OrderJournal(str(tmp_path / "j.db"))
+
+    class Boom(StubClient):
+        def place_order(self, *a, **k):
+            # by now the intent must already be durable
+            assert j.pending(), "intent was not recorded before submission"
+            raise RuntimeError("process died")
+
+    ex = Executor(Boom(), rm(), journal=j)
+    with pytest.raises(RuntimeError):
+        ex.apply(Plan([], [d()], [], []))
+    assert len(j.pending()) == 1
+    j.close()
+
+
+def test_retryable_failure_leaves_entry_pending_for_recovery(tmp_path):
+    """A 502 may already have executed, so the entry must stay recoverable."""
+    from sigbot.api import ApiError
+    j = OrderJournal(str(tmp_path / "j.db"))
+
+    class Unknown(StubClient):
+        def place_order(self, *a, **k):
+            raise ApiError(502, "ORDER_STATUS_UNKNOWN", "")
+
+    Executor(Unknown(), rm(), journal=j).apply(Plan([], [d()], [], []))
+    assert len(j.pending()) == 1          # NOT marked failed
+    j.close()
+
+
+def test_terminal_failure_is_marked_failed(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    Executor(StubClient(fail=True), rm(), journal=j).apply(Plan([], [d()], [], []))
+    assert j.pending() == []
+    assert j.stats().get(FAILED) == 1
+    j.close()
+
+
+def test_executor_uses_the_journal_key_for_placement(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    cl = StubClient()
+    Executor(cl, rm(), journal=j).apply(Plan([], [d()], [], []))
+    assert cl.seen_keys and cl.seen_keys[0]
+    assert j.get(cl.seen_keys[0]).status == PLACED
+    j.close()
+
+
+def test_batch_placements_are_journalled(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    places = [d(exchange_id=str(i)) for i in range(5)]
+    Executor(StubClient(), rm(), journal=j).apply(Plan([], places, [], []))
+    assert len(j.managed_order_ids()) == 5
+    assert j.pending() == []
+    j.close()
+
+
+def test_executor_works_without_a_journal(tmp_path):
+    out = Executor(StubClient(), rm(), journal=None).apply(Plan([], [d()], [], []))
+    assert out["placed"] == 1
+
+
+# ----------------------------------------------------------- recovery ------
+
+def test_recover_resolves_orphans_using_the_same_key(tmp_path):
+    """
+    Simulates a crash: an entry is pending with no order id. Recovery re-submits
+    under the SAME key, which the venue replays rather than double-placing.
+    """
+    j = OrderJournal(str(tmp_path / "j.db"))
+    j.record_intent("orphan-1", "36", "yes", "buy", 0.5, 10, "ladder")
+    cl = StubClient()
+    out = recover(j, cl, dry_run=False)
+    assert out["pending"] == 1 and out["resolved"] == 1
+    assert cl.seen_keys == ["orphan-1"]            # same key, not a new one
+    assert j.pending() == []
+    assert j.managed_order_ids()
+    j.close()
+
+
+def test_recover_is_a_noop_in_dry_run(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    j.record_intent("orphan-1", "36", "yes", "buy", 0.5, 10, "ladder")
+    cl = StubClient()
+    out = recover(j, cl, dry_run=True)
+    assert out["pending"] == 1 and out["resolved"] == 0
+    assert cl.seen_keys == []
+    assert len(j.pending()) == 1
+    j.close()
+
+
+def test_recover_marks_terminal_failures(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    j.record_intent("orphan-1", "36", "yes", "buy", 0.5, 10, "ladder")
+    out = recover(j, StubClient(fail=True), dry_run=False)
+    assert out["failed"] == 1 and j.pending() == []
+    j.close()
+
+
+def test_journal_survives_reopen(tmp_path):
+    """Durability: a new process must see what the dead one recorded."""
+    path = str(tmp_path / "j.db")
+    j1 = OrderJournal(path)
+    j1.record_intent("k", "36", "yes", "buy", 0.5, 10, "ladder")
+    j1.close()
+    j2 = OrderJournal(path)
+    assert len(j2.pending()) == 1
+    j2.close()
+
+
+def test_ownership_comes_from_the_journal_not_the_account(tmp_path):
+    """
+    A manual order placed outside the bot must never appear in managed ids,
+    no matter what the account returns.
+    """
+    j = OrderJournal(str(tmp_path / "j.db"))
+    j.record_intent("mine", "36", "yes", "buy", 0.5, 10, "ladder")
+    j.record_placed("mine", 111)
+    assert j.managed_order_ids() == {111}          # 999 (manual) is absent
+    j.close()

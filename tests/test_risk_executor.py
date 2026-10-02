@@ -423,3 +423,47 @@ def test_batch_with_unrecognised_response_does_not_claim_success():
     out = Executor(C(), rm()).apply(Plan([], [d(), d(price=0.4)], [], []))
     assert out["placed"] == 0
     assert out["errors"]
+
+
+# ------------------------------------------------ short collateral ---------
+
+def test_selling_the_cheap_tail_is_charged_full_collateral():
+    """Selling YES at 0.02 is a long NO at 0.98 and ties up 980, not 20."""
+    from sigbot.risk import collateral
+    assert collateral("sell", 0.02, 1000) == pytest.approx(980.0)
+    assert collateral("buy", 0.02, 1000) == pytest.approx(20.0)
+
+
+def test_tail_sells_exhaust_the_strategy_budget_at_the_right_rate():
+    """
+    The fix is about ACCOUNTING, not a single veto: 980 of collateral is under
+    the 5% per-market cap, but it consumes the relvalue budget 49x faster than
+    the old price*quantity math did.
+
+    relvalue budget = 25% of 100,000 = 25,000.
+    Correct:  25,000 / 980 ~= 25 sells.   Buggy: 25,000 / 20 = 1,250 sells.
+    """
+    desired = [d(exchange_id=str(i), action="sell", price=0.02, quantity=1000,
+                 strategy="relvalue") for i in range(60)]
+    p = plan_orders(desired, [], rm(), state())
+    assert len(p.places) <= 30, f"approved {len(p.places)}; collateral understated"
+    assert len(p.places) >= 20, "should still fit roughly 25"
+    assert p.vetoed
+
+
+def test_repeated_sells_cannot_walk_past_the_per_market_cap():
+    """Unsigned accounting let a growing short free its own capacity."""
+    s = state(positions={"1": -4000.0})
+    desired = [d(exchange_id="1", action="sell", price=0.90, quantity=1000,
+                 strategy="relvalue") for _ in range(12)]
+    p = plan_orders(desired, [], rm(), s)
+    assert len(p.places) <= 2, f"approved {len(p.places)} sells on top of a short"
+    assert p.vetoed
+
+
+def test_position_reducing_trade_is_not_blocked_by_the_cap():
+    """Charging an exit against the cap would trap us in a position."""
+    s = state(positions={"1": 4000.0})
+    v = rm().check(s, exchange_id="1", action="sell", price=0.90,
+                   quantity=100, strategy="relvalue")
+    assert v is None

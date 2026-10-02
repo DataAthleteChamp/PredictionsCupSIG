@@ -99,7 +99,17 @@ def test_devig_normalises_within_a_race():
 
 def test_devig_leaves_separate_races_independent():
     out = FairValueEngine(xw()).devig_by_race({"1": 0.6, "2": 0.45, "3": 0.9})
-    assert out["3"] == pytest.approx(1.0)      # alone in its race -> normalises to 1
+    assert out["1"] + out["2"] == pytest.approx(1.0)
+    # Alone in its race: must pass through UNCHANGED. Normalising a lone
+    # probability to 1.0 would fabricate certainty and drive a bad trade.
+    assert out["3"] == pytest.approx(0.9)
+
+
+def test_devig_never_fabricates_certainty_from_a_lone_market():
+    """Groups lose members routinely (one-sided books, dropped CLOB calls)."""
+    eng = FairValueEngine(xw())
+    for anchor in (0.05, 0.20, 0.50, 0.90):
+        assert eng.devig_by_race({"3": anchor})["3"] == pytest.approx(anchor)
 
 
 def test_internal_uses_microprice_not_mid():
@@ -124,7 +134,21 @@ def test_combine_falls_back_to_internal_without_an_anchor():
     eng = FairValueEngine(Crosswalk(token_by_exchange={},
                                     key_by_exchange={"1": ("SENATE", "X", "R")}))
     out = eng.combine({"1": {"bestBid": 0.40, "bestAsk": 0.44}}, {})
-    assert out["1"] == pytest.approx(1.0)      # only outcome in its race
+    assert out["1"] == pytest.approx(0.42)     # microprice, not fabricated 1.0
+
+
+def test_dropped_anchor_leg_does_not_corrupt_its_partner():
+    """
+    Issue found in review: if one leg's CLOB midpoint is missing, de-vigging the
+    survivor alone returned 1.0 and the anchor had no effect on the output.
+    """
+    eng = FairValueEngine(xw(), anchor_weight=0.65)
+    books = {"1": {"bestBid": 0.28, "bestAsk": 0.32},
+             "2": {"bestBid": 0.68, "bestAsk": 0.72}}
+    low = eng.combine(books, {"tokA": 0.20})    # tokB missing
+    high = eng.combine(books, {"tokA": 0.90})
+    assert low["1"] != high["1"], "anchor must still influence the result"
+    assert low["1"] < high["1"]
 
 
 def test_combine_respects_anchor_weight():

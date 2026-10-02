@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .api import ApiError, Client, DryRunBlocked
+from .journal import OrderJournal
+from .risk import collateral
 from .risk import PortfolioState, RiskManager
 
 
@@ -129,10 +131,14 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
         else:
             places.append(d)
         # Count it either way: a kept order is live exposure too.
-        notional = d.price * d.quantity
+        # Sign matters: an unsigned tally lets repeated SELLS walk a short
+        # position toward zero, shrinking measured exposure and freeing
+        # capacity for the next sell - the opposite of a cap.
+        notional = collateral(d.action, d.price, d.quantity)
+        delta = d.quantity if d.action == "buy" else -d.quantity
         running.cost_basis += notional
         running.positions[d.exchange_id] = (
-            running.positions.get(d.exchange_id, 0.0) + d.quantity)
+            running.positions.get(d.exchange_id, 0.0) + delta)
         running.deployed_by_strategy[d.strategy] = (
             running.deployed_by_strategy.get(d.strategy, 0.0) + notional)
 
@@ -146,9 +152,13 @@ class Executor:
 
     BATCH_SIZE = 50
 
-    def __init__(self, client: Client, risk: RiskManager):
+    def __init__(self, client: Client, risk: RiskManager,
+                 journal: OrderJournal | None = None):
         self.client = client
         self.risk = risk
+        # Without a journal, a crash between placement and persistence leaves
+        # orders the bot can never manage again.
+        self.journal = journal
 
     def apply(self, plan: Plan, *, dry_run: bool | None = None,
               use_batch: bool = True) -> dict:
@@ -184,17 +194,35 @@ class Executor:
             result.update(self._place_batched(plan.places, result))
         else:
             for d in plan.places:
+                key = self._intent(d)
                 try:
                     resp = self.client.place_order(d.exchange_id, d.side, d.action,
-                                                   d.quantity, d.price)
+                                                   d.quantity, d.price,
+                                                   idempotency_key=key)
                     result["placed"] += 1
                     result["requests"] += 1
                     oid = (resp or {}).get("orderId")
                     if oid is not None:
                         result["placed_order_ids"].append(int(oid))
+                    if self.journal and key:
+                        self.journal.record_placed(key, oid)
                 except (ApiError, DryRunBlocked) as e:
+                    # Leave the entry PENDING on a retryable error so recovery
+                    # can resolve it; only mark terminal failures FAILED.
+                    if self.journal and key and not (
+                            isinstance(e, ApiError) and e.retryable):
+                        self.journal.record_failed(key, str(e))
                     result["errors"].append(f"place {d.exchange_id}@{d.price}: {e}")
         return result
+
+    def _intent(self, d: DesiredOrder) -> str | None:
+        """Write-ahead: record the intent BEFORE the order is submitted."""
+        if not self.journal:
+            return None
+        key = self.journal.new_key()
+        self.journal.record_intent(key, d.exchange_id, d.side, d.action,
+                                   d.price, d.quantity, d.strategy)
+        return key
 
     def _place_batched(self, places: list[DesiredOrder], result: dict) -> dict:
         """
@@ -204,6 +232,7 @@ class Executor:
         """
         for i in range(0, len(places), self.BATCH_SIZE):
             chunk = places[i:i + self.BATCH_SIZE]
+            keys = [self._intent(d) for d in chunk]
             payload = [{"exchangeId": d.exchange_id, "side": d.side,
                         "action": d.action, "quantity": d.quantity,
                         "price": d.price} for d in chunk]
@@ -211,17 +240,31 @@ class Executor:
                 resp = self.client.place_batch(payload)
                 result["requests"] += 1
                 rows = resp.get("results", []) if isinstance(resp, dict) else []
+                if rows and len(rows) < len(chunk):
+                    # The venue places serially under a time budget and may
+                    # acknowledge only a prefix. Unacknowledged orders may still
+                    # have landed, so flag them rather than losing them silently.
+                    result["errors"].append(
+                        f"batch {i // self.BATCH_SIZE}: only {len(rows)} of "
+                        f"{len(chunk)} acknowledged - reconcile before next cycle")
+                    result["needs_reconcile"] = True
                 if rows:
                     for r in rows:
                         data = r.get("data") or {}
+                        idx = r.get("index")
+                        k = keys[idx] if isinstance(idx, int) and idx < len(keys) else None
                         if r.get("ok"):
                             result["placed"] += 1
                             oid = data.get("orderId")
                             if oid is not None:
                                 result["placed_order_ids"].append(int(oid))
+                            if self.journal and k:
+                                self.journal.record_placed(k, oid)
                         else:
+                            if self.journal and k:
+                                self.journal.record_failed(k, str(data.get("code")))
                             result["errors"].append(
-                                f"batch item {r.get('index')}: "
+                                f"batch item {idx}: "
                                 f"{data.get('code', r.get('status'))}")
                 else:
                     # Unrecognised response shape: do NOT assume success. This

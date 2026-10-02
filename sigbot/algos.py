@@ -60,7 +60,14 @@ def devig(probs: dict[str, float]) -> dict[str, float]:
 
     Removes the overround. On this venue the R and D markets for a race are
     separate books, so their prices do NOT sum to 1 without this step.
+
+    A single-member group is NOT de-vigged: dividing a lone probability by
+    itself returns 1.0, silently replacing a real estimate with certainty.
+    Groups lose members routinely (one-sided books, a dropped CLOB request), so
+    this must fail safe by passing the value through untouched.
     """
+    if len(probs) < 2:
+        return dict(probs)
     tot = sum(probs.values())
     if tot <= 0:
         return {k: 0.0 for k in probs}

@@ -40,11 +40,20 @@ class Leg:
 
 @dataclass
 class RacePosition:
-    """Our holdings in one race, plus the full outcome space for that race."""
+    """
+    Our holdings in one race, plus the full outcome space for that race.
+
+    `complete` records whether `outcomes` is known to enumerate EVERY possible
+    winner. A floor computed over a partial outcome set is not a floor: a
+    missing outcome is one that cannot lose, so the result is biased optimistic.
+    A 100-share long at 0.40 with only its own outcome listed reports a +60
+    floor when the true worst case is -40.
+    """
 
     race: str
     outcomes: tuple[str, ...]
     legs: list[Leg] = field(default_factory=list)
+    complete: bool = True
 
     @property
     def cost(self) -> float:
@@ -54,9 +63,16 @@ class RacePosition:
         return sum(l.payout_if(winner) for l in self.legs)
 
     @property
+    def enumerable(self) -> bool:
+        """A floor is only meaningful over a complete, multi-outcome space."""
+        return self.complete and len(self.outcomes) >= 2
+
+    @property
     def worst_payout(self) -> float:
         if not self.outcomes:
             return 0.0
+        if not self.enumerable:
+            return 0.0          # assume the worst: nothing we hold pays
         return min(self.payout_if(w) for w in self.outcomes)
 
     @property
@@ -72,7 +88,7 @@ class RacePosition:
 
     @property
     def is_risk_free(self) -> bool:
-        return self.guaranteed_floor > 0
+        return self.enumerable and self.guaranteed_floor > 0
 
     def max_price_to_lock(self, party: str, quantity: float) -> float | None:
         """
@@ -86,6 +102,8 @@ class RacePosition:
         Returns None when no price in (0, 1) achieves it.
         """
         if party not in self.outcomes or quantity <= 0:
+            return None
+        if not self.enumerable:
             return None
         lo, hi = 0.0, 1.0
         for _ in range(60):                      # bisection; monotone in price

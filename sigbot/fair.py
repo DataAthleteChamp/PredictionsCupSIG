@@ -145,19 +145,30 @@ def build_crosswalk(sig_markets: list[dict], max_pages: int = 12) -> Crosswalk:
     return xw
 
 
-def clob_midpoints(token_ids: list[str], chunk: int = 50) -> dict[str, float]:
+def clob_midpoints(token_ids: list[str], chunk: int = 50,
+                   budget_seconds: float = 25.0,
+                   per_request_timeout: float = 4.0) -> dict[str, float]:
     """
     Live midpoints from the CLOB. Never Gamma — Gamma is edge-cached for 300s.
+
+    Bounded by a wall-clock budget. Previously this made one sequential request
+    per token with a 30s timeout each; at 228 tokens a degraded Polymarket could
+    stall the trading loop for over an hour without raising anything, and every
+    quote the cycle then acted on was correspondingly stale.
     """
+    import time as _time
     out: dict[str, float] = {}
-    for i in range(0, len(token_ids), chunk):
-        for tid in token_ids[i:i + chunk]:
-            try:
-                d = _fetch(f"{CLOB}/midpoint?token_id={urllib.parse.quote(tid)}")
-                if d and d.get("mid") is not None:
-                    out[tid] = float(d["mid"])
-            except Exception:
-                continue
+    deadline = _time.monotonic() + budget_seconds
+    for tid in token_ids:
+        if _time.monotonic() > deadline:
+            break
+        try:
+            d = _fetch(f"{CLOB}/midpoint?token_id={urllib.parse.quote(tid)}",
+                       timeout=per_request_timeout)
+            if d and d.get("mid") is not None:
+                out[tid] = float(d["mid"])
+        except Exception:
+            continue
     return out
 
 

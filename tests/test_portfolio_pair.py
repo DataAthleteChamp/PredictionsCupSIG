@@ -196,3 +196,45 @@ def test_pair_strategy_is_deterministic():
 
 def test_pair_strategy_uses_the_ladder_budget():
     assert PairStrategy().name == "ladder"
+
+
+# ------------------------------------------- outcome-space completeness -----
+
+def test_incomplete_outcome_space_is_never_risk_free():
+    """
+    A 100-share long at 0.40 with only its own outcome enumerated previously
+    reported a +60 floor. The true worst case is -40.
+    """
+    partial = RacePosition("race", ("R",), [Leg("R", 100, 0.40)], complete=True)
+    assert not partial.enumerable          # fewer than 2 outcomes
+    assert partial.guaranteed_floor == pytest.approx(-40.0)
+    assert not partial.is_risk_free
+
+
+def test_explicitly_incomplete_space_is_not_enumerable():
+    pos = RacePosition("race", ("R", "D"),
+                       [Leg("R", 100, 0.40), Leg("D", 100, 0.50)],
+                       complete=False)
+    assert not pos.enumerable
+    assert not pos.is_risk_free
+    assert pos.guaranteed_floor == pytest.approx(-90.0)   # assume nothing pays
+
+
+def test_complete_space_still_locks_normally():
+    pos = RacePosition("race", ("R", "D"),
+                       [Leg("R", 100, 0.40), Leg("D", 100, 0.50)], complete=True)
+    assert pos.enumerable and pos.is_risk_free
+
+
+def test_lock_price_refuses_an_incomplete_space():
+    pos = RacePosition("race", ("R",), [Leg("R", 100, 0.40)], complete=True)
+    assert pos.max_price_to_lock("R", 100) is None
+
+
+def test_pair_strategy_will_not_skip_an_unhedgeable_race():
+    """It must not mistake an incomplete space for an already-locked race."""
+    races = {"race": RacePosition("race", ("R",), [Leg("R", 100, 0.40)])}
+    out = PairStrategy().desired(view({"77": Quote("77", 0.5, 0.55)}),
+                                 races, {("race", "D"): "77"})
+    assert out == []       # no lock price exists, but it is not treated as safe
+    assert not races["race"].is_risk_free

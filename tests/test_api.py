@@ -393,3 +393,31 @@ def test_request_timeout_is_tight_enough_to_fail_fast():
     import inspect
     sig = inspect.signature(Client._call)
     assert sig.parameters["timeout"].default <= 20.0
+
+
+def test_writes_get_a_longer_timeout_than_reads():
+    """
+    The venue places a 50-order batch SERIALLY. Timing that out and retrying
+    returns 409 REQUEST_IN_FLIGHT while the orders have already landed: the
+    journal keeps the intents PENDING and the live orders become orphans.
+    A 15s write timeout produced exactly that -- 47 placed, 0 recorded.
+    """
+    from sigbot.api import READ_TIMEOUT, WRITE_TIMEOUT
+    assert WRITE_TIMEOUT >= 4 * READ_TIMEOUT
+
+    seen = []
+
+    def spy(method, url, headers, body, timeout):
+        seen.append((url.rsplit("/", 1)[-1], timeout))
+        return Response(200, {"results": []})
+
+    s = make_settings()
+    object.__setattr__(s, "dry_run", False)
+    object.__setattr__(s, "live_trading", True)
+    c = Client(s, transport=spy, sleep=lambda x: None)
+    c.place_batch([{"exchangeId": "1", "side": "yes", "action": "buy",
+                    "quantity": 1, "price": 0.5}])
+    c.get("/account")
+    kinds = dict(seen)
+    assert kinds["batch"] == WRITE_TIMEOUT
+    assert kinds["account"] == READ_TIMEOUT

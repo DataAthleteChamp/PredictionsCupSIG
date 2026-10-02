@@ -59,6 +59,17 @@ TRANSIENT_NETWORK_ERRORS = (
 )
 
 
+# Reads are small and must fail fast; a stalled read costs us a whole cycle.
+# Writes are different: the venue places a 50-order batch SERIALLY under its
+# own time budget, so the response is legitimately slow. Timing a batch out and
+# retrying it is worse than waiting -- the orders usually landed, and the retry
+# returns 409 REQUEST_IN_FLIGHT while the journal keeps the intents PENDING and
+# the live orders become orphans. That is exactly what a 15s write timeout
+# produced: 47 orders placed, 0 recorded, 47 orphaned.
+READ_TIMEOUT = 15.0
+WRITE_TIMEOUT = 60.0
+
+
 class IncompletePagination(RuntimeError):
     """
     A paginated walk could not be proven complete.
@@ -161,7 +172,7 @@ class Client:
         return h
 
     def _call(self, method: str, path: str, *, key: str, body: dict | None = None,
-              max_tries: int = 5, timeout: float = 15.0) -> Any:
+              max_tries: int = 5, timeout: float = READ_TIMEOUT) -> Any:
         payload = json.dumps(body).encode() if body is not None else None
         url = self.s.base_url + path
         delay = 0.2
@@ -311,7 +322,8 @@ class Client:
         }
         if price is not None:
             body["price"] = price
-        return self._call("POST", "/orders", key=self.s.exec_key, body=body)
+        return self._call("POST", "/orders", key=self.s.exec_key, body=body,
+                          timeout=WRITE_TIMEOUT)
 
     def place_batch(self, orders: list[dict],
                     idempotency_key: str | None = None) -> dict:
@@ -338,7 +350,8 @@ class Client:
             "idempotencyKey": idempotency_key or f"sigbot-batch-{uuid.uuid4()}",
             "orders": [{**o, "tournamentId": self.s.tournament_id} for o in orders],
         }
-        return self._call("POST", "/orders/batch", key=self.s.exec_key, body=body)
+        return self._call("POST", "/orders/batch", key=self.s.exec_key, body=body,
+                          timeout=WRITE_TIMEOUT)
 
     def cancel_order(self, order_id: int) -> Any:
         self._require_live()

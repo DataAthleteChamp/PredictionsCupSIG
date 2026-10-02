@@ -173,13 +173,15 @@ def clob_midpoints(token_ids: list[str], chunk: int = 50,
 
 
 class FairValueEngine:
-    """Blends the venue's own microprice with the external anchor."""
+    """
+    Turns external (Polymarket) prices into fair values for SIG exchanges.
 
-    def __init__(self, crosswalk: Crosswalk, anchor_weight: float = 0.65):
-        if not 0.0 <= anchor_weight <= 1.0:
-            raise ValueError("anchor_weight must be in [0, 1]")
+    Deliberately NOT a blend with SIG's own price. The disagreement between the
+    two venues is the entire signal; averaging them shrinks it.
+    """
+
+    def __init__(self, crosswalk: Crosswalk):
         self.xw = crosswalk
-        self.w = anchor_weight
 
     def internal(self, books: dict[str, dict]) -> dict[str, float]:
         """Microprice per exchange from top-of-book depth."""
@@ -202,6 +204,17 @@ class FairValueEngine:
         Normalise each race so its outcomes sum to 1. R and D are separate books
         here, so raw prices carry an overround that must be removed before they
         can be compared to anything.
+
+        Only a COMPLETE outcome set may be normalised. Three races -- Nebraska
+        and Montana Senate, Rhode Island Governor -- carry a serious
+        Independent, so P(R) + P(D) is genuinely less than 1 there. Forcing a
+        partial set to sum to 1 is the complement assumption this codebase
+        bans: with the Independent's mass redistributed, raw values of
+        R=0.70/D=0.05 come back as 0.933/0.067, inventing 23 points of
+        probability and a large fictitious edge.
+
+        When outcomes are missing the values pass through untouched. Carrying a
+        small overround is harmless; manufacturing probability is not.
         """
         groups: dict[tuple, dict[str, float]] = {}
         for ex, p in probs.items():
@@ -209,24 +222,41 @@ class FairValueEngine:
             if k is None:
                 continue
             groups.setdefault((k[0], k[1]), {})[ex] = p
+        # How many outcomes the race actually has, from the full SIG universe.
+        known: dict[tuple, int] = {}
+        for k in self.xw.key_by_exchange.values():
+            known[(k[0], k[1])] = known.get((k[0], k[1]), 0) + 1
         out: dict[str, float] = {}
-        for race in groups.values():
-            out.update(devig(race))
+        for race_key, race in groups.items():
+            if len(race) == known.get(race_key, len(race)):
+                out.update(devig(race))
+            else:
+                out.update(race)
         return out
 
     def combine(self, books: dict[str, dict],
                 clob_mids: dict[str, float]) -> dict[str, float]:
         """
-        Final fair value per exchange.
+        Final fair value per exchange: the external anchor, de-vigged.
 
-        Where we have an external anchor, blend it with the internal microprice.
-        Where we do not, fall back to the internal view alone — which yields no
-        relative-value signal, correctly, since there is nothing to disagree with.
+        A fair value is produced ONLY where an external anchor exists. The
+        previous version seeded the result with the venue's own microprice, so
+        a Polymarket outage -- or simply one of the nine unmatched markets --
+        silently produced a "fair value" derived from the very book we were
+        about to trade against. That is not a neutral fallback: de-vigging
+        moves the internal value away from its own touch whenever the separate
+        R and D books do not sum to one, so it manufactures a relative-value
+        signal out of nothing. Replaying our own tape with the external feed
+        emptied still generated 33 orders, including a 63-lot sell of Alaska
+        Senate D against a fair value computed entirely from Alaska Senate D.
+
+        The anchor is also used undiluted. Blending it with SIG's own microprice
+        is circular: the disagreement between the two venues IS the signal, and
+        averaging them shrinks exactly the quantity being traded. research/
+        METHODS.md states this directly -- "Do NOT ensemble with SIG's own live
+        price - that is circular and erases the very edge we are trying to
+        measure" -- and the 0.65 blend did it anyway, attenuating the
+        favourite-longshot edge below the trading threshold in the tails where
+        it was actually validated.
         """
-        internal = self.devig_by_race(self.internal(books))
-        external = self.devig_by_race(self.external(clob_mids))
-        out = dict(internal)
-        for ex, anchor in external.items():
-            own = internal.get(ex)
-            out[ex] = anchor if own is None else self.w * anchor + (1 - self.w) * own
-        return out
+        return self.devig_by_race(self.external(clob_mids))

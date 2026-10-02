@@ -309,3 +309,17 @@ def test_adopted_orders_become_cancellable_by_the_executor(tmp_path):
     after = plan_orders([], live, risk, _pstate(),
                         managed_order_ids=j.managed_order_ids())
     assert [o.order_id for o in after.cancels] == [11]
+
+
+# -------------------------------------------------- fail-closed semantics ---
+
+def test_placed_without_an_order_id_stays_pending(tmp_path):
+    """
+    A success response with no order id is AMBIGUOUS. Recording PLACED would
+    claim success while leaving the order permanently unmanageable.
+    """
+    j = OrderJournal(str(tmp_path / "j.db"))
+    k = j.record_intent("k1", "7", "yes", "buy", 0.3, 10, "ladder")
+    j.record_placed(k, None)
+    assert j.managed_order_ids() == set()
+    assert [e.key for e in j.pending()] == ["k1"], "must remain recoverable"

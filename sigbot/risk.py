@@ -88,14 +88,34 @@ class RiskManager:
         if quantity <= 0:
             return Veto("non-positive quantity")
 
-        # The tail guards are statements about YES probability -- we measured
-        # negative markout buying YES below 0.15 -- so they must be applied to
-        # the economic YES trade, not to whatever frame the order is quoted in.
-        # A `no` sell at 0.97 IS a YES buy at 0.03 and must be blocked; a `no`
-        # buy at 0.97 IS a YES sell at 0.03, which is the favourite-longshot
-        # edge we actively want and must not be blocked by a buy-side ceiling.
         yes_action, yes_price = to_yes_frame(side, action, price)
-        if yes_action == "buy":
+
+        held = state.positions.get(exchange_id, 0.0)
+        # Split the order into the part that closes existing exposure and the
+        # part that opens new exposure. Only the opening part consumes capital;
+        # charging the closing part against the caps would block exits exactly
+        # when we most need them -- near a cap, or on an oversized position.
+        #
+        # Direction must be judged in YES space: a `no` buy is economically a
+        # YES sell, so reading the raw action would treat it as closing a short
+        # it is actually doubling.
+        closing = ((held > 0 and yes_action == "sell")
+                   or (held < 0 and yes_action == "buy"))
+        reduce_qty = min(quantity, abs(held)) if closing else 0
+        open_qty = quantity - reduce_qty
+        notional = collateral(action, price, open_qty)
+
+        # The tail guards are statements about YES probability -- we measured
+        # negative markout BUYING YES below 0.15 -- so they must be applied to
+        # the economic YES trade, and ONLY to exposure being opened.
+        #
+        # Applying them to a closing order inverted the strategy. Our validated
+        # edge is selling overpriced tails; when the price then falls below
+        # 0.15 the trade has WORKED, and buying it back is how the profit is
+        # realised and the collateral released. The guard vetoed exactly that,
+        # so winning tail shorts could never be harvested and were forced to
+        # ride to settlement instead.
+        if yes_action == "buy" and open_qty > 0:
             if yes_price < self.limits.no_buy_below:
                 return Veto(f"price {yes_price} below no-buy floor "
                             f"{self.limits.no_buy_below} (tail markout is negative)")
@@ -103,17 +123,7 @@ class RiskManager:
                 return Veto(f"price {yes_price} above no-buy ceiling "
                             f"{self.limits.no_buy_above}")
 
-        held = state.positions.get(exchange_id, 0.0)
-        # Split the order into the part that closes existing exposure and the
-        # part that opens new exposure. Only the opening part consumes capital;
-        # charging the closing part against the caps would block exits exactly
-        # when we most need them -- near a cap, or on an oversized position.
-        closing = (held > 0 and action == "sell") or (held < 0 and action == "buy")
-        reduce_qty = min(quantity, abs(held)) if closing else 0
-        open_qty = quantity - reduce_qty
-        notional = collateral(action, price, open_qty)
-
-        resulting = abs(held - quantity if action == "sell" else held + quantity)
+        resulting = abs(held - quantity if yes_action == "sell" else held + quantity)
         if resulting > self.limits.max_position_shares and open_qty > 0:
             return Veto("per-market share cap")
 

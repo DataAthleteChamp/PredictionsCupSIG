@@ -17,10 +17,24 @@ TRADING_CLOSE_UTC = "2026-11-04T17:00:00+00:00"
 
 
 def _f(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except ValueError:
+    """
+    Read a float from the environment.
+
+    An ABSENT variable falls back to the default; a PRESENT but malformed one
+    raises. Silently swallowing `SIG_MAX_DEPLOYED_FRACTION=0.O5` and returning
+    the 0.90 default is precisely how this bot once ran for hours on a cap
+    nobody intended. A typo in a risk limit must stop the process, not quietly
+    widen it.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
         return default
+    try:
+        return float(raw)
+    except ValueError as e:
+        raise RuntimeError(
+            f"{name}={raw!r} is not a number; refusing to fall back to "
+            f"{default} for a risk limit") from e
 
 
 @dataclass(frozen=True)

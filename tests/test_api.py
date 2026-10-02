@@ -4,7 +4,8 @@ import time
 
 import pytest
 
-from sigbot.api import (ApiError, Client, DryRunBlocked, Response, TokenBucket)
+from sigbot.api import (ApiError, Client, DryRunBlocked, IncompletePagination,
+                        Response, TokenBucket)
 from sigbot.config import Settings
 
 
@@ -276,14 +277,47 @@ def test_open_orders_paginates_beyond_one_page():
     assert len(t.calls) == 2
 
 
-def test_open_orders_stops_on_repeated_cursor():
-    """Guard against a server returning a constant cursor forever."""
+def test_open_orders_raises_on_repeated_cursor():
+    """
+    A server returning a constant cursor means the walk cannot be completed.
+
+    This previously asserted only that the loop terminated, returning whatever
+    partial list it had collected. That is the dangerous outcome: the runner
+    treats a managed order's absence from this list as proof it closed, so a
+    truncated page silently orphans live orders and invites duplicates. The
+    walk must fail loudly instead.
+    """
     t = FakeTransport([Response(200, {"data": [{"id": 1}],
                                       "pagination": {"hasMore": True,
                                                      "nextCursor": "same"}})] * 10)
     c = Client(make_settings(), transport=t, sleep=lambda s: None)
-    c.open_orders()
+    with pytest.raises(IncompletePagination):
+        c.open_orders()
     assert len(t.calls) <= 3
+
+
+def test_open_orders_caps_pages_and_raises():
+    """An endlessly-advancing cursor must not loop forever or return partial."""
+    t = FakeTransport([Response(200, {"data": [{"id": i}],
+                                      "pagination": {"hasMore": True,
+                                                     "nextCursor": f"c{i}"}})
+                       for i in range(200)])
+    c = Client(make_settings(), transport=t, sleep=lambda s: None)
+    with pytest.raises(IncompletePagination):
+        c.open_orders(max_pages=5)
+    assert len(t.calls) <= 6
+
+
+def test_open_orders_returns_a_complete_walk():
+    """The normal multi-page case must still succeed."""
+    t = FakeTransport([
+        Response(200, {"data": [{"id": 1}],
+                       "pagination": {"hasMore": True, "nextCursor": "c1"}}),
+        Response(200, {"data": [{"id": 2}],
+                       "pagination": {"hasMore": False}}),
+    ])
+    c = Client(make_settings(), transport=t, sleep=lambda s: None)
+    assert [o["id"] for o in c.open_orders()] == [1, 2]
 
 
 # ------------------------------------------------------- URL encoding -------

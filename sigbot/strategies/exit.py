@@ -77,13 +77,13 @@ class ExitStrategy:
 
             stale = lot.age_minutes >= c.decay_minutes
             if qty > 0:
-                px = self._long_exit_price(lot.avg_cost, q.best_ask, stale, c)
+                px = self._long_exit_price(lot.avg_cost, q.best_bid, stale, c)
                 # Strictly passive: an offer must sit above the best bid.
                 if px is None or (q.best_bid is not None and px <= q.best_bid):
                     continue
                 action, side = "sell", "yes"
             else:
-                px = self._short_exit_price(lot.avg_cost, q.best_bid, stale, c)
+                px = self._short_exit_price(lot.avg_cost, q.best_ask, stale, c)
                 if px is None or (q.best_ask is not None and px >= q.best_ask):
                     continue
                 action, side = "buy", "yes"
@@ -96,28 +96,37 @@ class ExitStrategy:
         return out
 
     @staticmethod
-    def _long_exit_price(avg_cost: float, best_ask: float | None,
+    def _long_exit_price(avg_cost: float, best_bid: float | None,
                          stale: bool, c: ExitConfig) -> float | None:
         """
         Sell price for a long: cost plus the edge when fresh, cost minus a
-        bounded scratch when stale.
+        bounded scratch when stale, but never below the current bid.
 
-        Deliberately independent of the current ask. Clamping to the ask looks
-        like "quote to get out", but it chases a collapsing book downwards: a
-        0.066 position against a 0.010 ask would quote 0.010 and realise a
-        5.6-cent loss to recover 1 cent of capital.
+        The cost-based target is deliberately not clamped DOWN to the book.
+        Chasing a collapsing book looks like "quote to get out" but realises
+        the loss: a 0.066 position against a 0.010 ask would quote 0.010 and
+        give up 5.6 cents to recover 1.
 
-        The measurement says the edge decays to zero past `decay_minutes` -- it
-        does not say the position is worth less. So stale inventory lowers its
-        ask by a fixed amount and is willing not to fill. Capital is not the
-        binding constraint here; realised losses are.
+        It must however be clamped UP. A stale position whose market moved in
+        our favour produced a target below the bid -- 0.020 against a 0.035 bid
+        for inventory bought at 0.032 -- and the caller's passivity check then
+        discarded it. The result was that stale, PROFITABLE inventory stopped
+        being quoted at all and simply sat there. Raising the floor to one tick
+        above the bid both restores the exit and captures the gain instead of
+        scratching beneath it.
         """
         ticks = -c.target_ticks if stale else c.target_ticks
-        return round_to_tick(avg_cost + ticks * TICK)
+        px = round_to_tick(avg_cost + ticks * TICK)
+        if best_bid is not None:
+            px = max(px, round_to_tick(best_bid + TICK))
+        return px
 
     @staticmethod
-    def _short_exit_price(avg_cost: float, best_bid: float | None,
+    def _short_exit_price(avg_cost: float, best_ask: float | None,
                           stale: bool, c: ExitConfig) -> float | None:
         """Buy price to close a short. Mirror image of the long case."""
         ticks = c.target_ticks if stale else -c.target_ticks
-        return round_to_tick(avg_cost + ticks * TICK)
+        px = round_to_tick(avg_cost + ticks * TICK)
+        if best_ask is not None:
+            px = min(px, round_to_tick(best_ask - TICK))
+        return px

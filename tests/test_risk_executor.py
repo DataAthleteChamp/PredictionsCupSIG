@@ -622,3 +622,179 @@ def test_build_races_converts_short_cost_to_yes_frame():
     leg = list(races.values())[0].legs[0]
     assert leg.avg_cost == pytest.approx(0.28), \
         f"short entry left in NO frame: {leg.avg_cost}"
+
+
+# ------------------------------------------- batch idempotency durability ---
+
+def test_batch_idempotency_key_is_derived_from_durable_journal_state():
+    """
+    The venue deduplicates on the batch key. A fresh uuid per call means an
+    ambiguous failure retries under a DIFFERENT key and the venue places the
+    batch twice. The key must be a deterministic function of the journal keys.
+    """
+    from sigbot.executor import Executor
+    from sigbot.journal import OrderJournal
+
+    seen = []
+
+    class Recorder:
+        def __init__(self):
+            self.s = settings(dry_run=False, live_trading=True)
+
+        def place_batch(self, orders, idempotency_key=None):
+            seen.append(idempotency_key)
+            return {"results": [{"index": i, "ok": True,
+                                 "data": {"orderId": 900 + i}}
+                                for i in range(len(orders))]}
+
+    j = OrderJournal(":memory:")
+    places = [d(exchange_id="1"), d(exchange_id="2")]
+    Executor(Recorder(), rm(), journal=j).apply(Plan([], places, [], []))
+
+    assert seen and seen[0] is not None, "no idempotency key was sent"
+    assert seen[0].startswith("sigbot-batch-")
+
+    # The key is a pure function of the durable journal keys, so replaying the
+    # same chunk presents the same key and the venue deduplicates it.
+    seen2 = []
+    j2 = OrderJournal(":memory:")
+
+    class Recorder2(Recorder):
+        def place_batch(self, orders, idempotency_key=None):
+            seen2.append(idempotency_key)
+            return {"results": []}
+
+    Executor(Recorder2(), rm(), journal=j2).apply(Plan([], places, [], []))
+    assert seen2[0] != seen[0], "distinct journal keys must give distinct batches"
+
+
+def test_distinct_batches_get_distinct_keys():
+    """Two different batches must not collide onto one key."""
+    seen = []
+
+    class Recorder:
+        def __init__(self):
+            self.s = settings(dry_run=False, live_trading=True)
+
+        def place_batch(self, orders, idempotency_key=None):
+            seen.append(idempotency_key)
+            return {"results": [{"index": i, "ok": True,
+                                 "data": {"orderId": 900 + i}}
+                                for i in range(len(orders))]}
+
+    from sigbot.executor import Executor
+    from sigbot.journal import OrderJournal
+    # >1 place so the batch path is taken rather than single placement.
+    for ex in ("1", "2"):
+        Executor(Recorder(), rm(), journal=OrderJournal(":memory:")).apply(
+            Plan([], [d(exchange_id=ex), d(exchange_id=ex + "0")], [], []))
+    assert len(set(seen)) == 2
+
+
+# ------------------------------------------- kill switch at the boundary ---
+
+def test_kill_switch_suppresses_placements_at_execution_time():
+    """
+    A Plan is data. It can be built before the switch trips and applied after,
+    and planning-time vetoes never run again on that path.
+    """
+    from sigbot.executor import Executor
+    calls = []
+
+    class Venue:
+        def __init__(self):
+            self.s = settings(dry_run=False, live_trading=True)
+
+        def place_batch(self, orders, idempotency_key=None):
+            calls.append(("place", len(orders)))
+            return {"results": []}
+
+        def place_order(self, *a, **k):
+            calls.append(("place", 1))
+            return {"orderId": 1}
+
+        def cancel_order(self, oid):
+            calls.append(("cancel", oid))
+
+    r = rm()
+    plan = Plan([], [d(exchange_id="1"), d(exchange_id="2")], [], [])
+    r.update(state(equity=50_000.0, peak_equity=100_000.0))   # 50% drawdown
+    assert r.tripped
+    out = Executor(Venue(), r).apply(plan)
+    assert not [c for c in calls if c[0] == "place"], "placed while tripped"
+    assert out["placed"] == 0
+    assert "kill switch" in " ".join(out["errors"])
+
+
+def test_kill_switch_still_allows_cancellations():
+    """Getting flat is exactly what a tripped switch wants."""
+    from sigbot.executor import Executor
+    calls = []
+
+    class Venue:
+        def __init__(self):
+            self.s = settings(dry_run=False, live_trading=True)
+
+        def cancel_order(self, oid):
+            calls.append(oid)
+
+    r = rm()
+    r.update(state(equity=50_000.0, peak_equity=100_000.0))
+    live = [LiveOrder.from_api({"id": 7, "exchangeId": "1", "side": "yes",
+                                "action": "buy", "quantity": 10,
+                                "priceLimit": 0.3})]
+    Executor(Venue(), r).apply(Plan(live, [], [], []))
+    assert calls == [7]
+
+
+# ------------------------------ tail guards apply only to opening exposure ---
+
+def test_winning_tail_short_can_be_bought_back():
+    """
+    Our validated edge is selling overpriced tails. When the price then falls
+    below 0.15 the trade has WORKED; buying it back realises the profit and
+    releases the collateral. The guard that stops us OPENING tail longs must
+    not stop us CLOSING a tail short.
+    """
+    risk = RiskManager(settings())
+    st = state(positions={"1": -100.0})
+    assert risk.check(st, exchange_id="1", action="buy", price=0.07,
+                      quantity=100, strategy="exit") is None
+
+
+def test_opening_a_tail_long_is_still_blocked():
+    risk = RiskManager(settings())
+    v = risk.check(state(), exchange_id="1", action="buy", price=0.07,
+                   quantity=100, strategy="ladder")
+    assert v is not None and "floor" in v.reason
+
+
+def test_closing_more_than_held_still_guards_the_opening_residual():
+    """Buying 150 against a 100 short closes 100 and OPENS 50 in the tail."""
+    risk = RiskManager(settings())
+    st = state(positions={"1": -100.0})
+    v = risk.check(st, exchange_id="1", action="buy", price=0.07,
+                   quantity=150, strategy="exit")
+    assert v is not None and "floor" in v.reason
+
+
+def test_ladder_outranks_relvalue_under_the_order_cap():
+    """
+    Ladder measures the best EV per order-hour, so truncation must fall on
+    relvalue first. An ascending sort over {"ladder": 3, "relvalue": 2} put
+    ladder last and truncated the best strategy instead.
+    """
+    from sigbot.runner import _truncate_by_priority
+    desired = ([d(exchange_id=str(i), strategy="relvalue") for i in range(10)]
+               + [d(exchange_id=str(100 + i), strategy="ladder")
+                  for i in range(10)])
+    kept = _truncate_by_priority(desired, [], set(), 10)
+    assert all(o.strategy == "ladder" for o in kept)
+
+
+def test_exit_outranks_everything():
+    from sigbot.runner import _truncate_by_priority
+    desired = ([d(exchange_id=str(i), strategy="ladder") for i in range(10)]
+               + [d(exchange_id="999", strategy="exit")])
+    kept = _truncate_by_priority(desired, [], set(), 1)
+    assert [o.strategy for o in kept] == ["exit"]

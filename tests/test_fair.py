@@ -123,18 +123,25 @@ def test_internal_skips_incomplete_books():
 
 
 def test_combine_blends_toward_the_anchor():
-    eng = FairValueEngine(xw(), anchor_weight=1.0)
+    eng = FairValueEngine(xw())
     books = {"1": {"bestBid": 0.50, "bestAsk": 0.52},
              "2": {"bestBid": 0.50, "bestAsk": 0.52}}
     out = eng.combine(books, {"tokA": 0.80, "tokB": 0.20})
     assert out["1"] == pytest.approx(0.80, abs=1e-6)
 
 
-def test_combine_falls_back_to_internal_without_an_anchor():
+def test_combine_emits_nothing_without_an_external_anchor():
+    """
+    This previously asserted that a missing anchor falls back to SIG's own
+    microprice. That fallback is how the bot traded against a fair value
+    derived from the very book it was quoting into: de-vigging moves the
+    internal value off its own touch, manufacturing a relative-value signal
+    from nothing. Replaying our tape with the feed emptied still produced 33
+    orders. No anchor must mean no fair value, so strategies stand down.
+    """
     eng = FairValueEngine(Crosswalk(token_by_exchange={},
                                     key_by_exchange={"1": ("SENATE", "X", "R")}))
-    out = eng.combine({"1": {"bestBid": 0.40, "bestAsk": 0.44}}, {})
-    assert out["1"] == pytest.approx(0.42)     # microprice, not fabricated 1.0
+    assert eng.combine({"1": {"bestBid": 0.40, "bestAsk": 0.44}}, {}) == {}
 
 
 def test_dropped_anchor_leg_does_not_corrupt_its_partner():
@@ -142,7 +149,7 @@ def test_dropped_anchor_leg_does_not_corrupt_its_partner():
     Issue found in review: if one leg's CLOB midpoint is missing, de-vigging the
     survivor alone returned 1.0 and the anchor had no effect on the output.
     """
-    eng = FairValueEngine(xw(), anchor_weight=0.65)
+    eng = FairValueEngine(xw())
     books = {"1": {"bestBid": 0.28, "bestAsk": 0.32},
              "2": {"bestBid": 0.68, "bestAsk": 0.72}}
     low = eng.combine(books, {"tokA": 0.20})    # tokB missing
@@ -151,14 +158,51 @@ def test_dropped_anchor_leg_does_not_corrupt_its_partner():
     assert low["1"] < high["1"]
 
 
-def test_combine_respects_anchor_weight():
-    eng = FairValueEngine(xw(), anchor_weight=0.5)
+def test_fair_value_is_the_anchor_not_a_blend_with_our_own_book():
+    """
+    Blending with SIG's microprice is circular: the gap between the venues IS
+    the trade. A 0.65/0.35 blend pulled a 0.025 Polymarket longshot up to
+    0.0329 against a SIG book of 0.045/0.050, dropping the edge below the
+    trading threshold -- destroying the favourite-longshot signal in exactly
+    the tails where it was validated.
+    """
+    eng = FairValueEngine(xw())
     books = {"1": {"bestBid": 0.50, "bestAsk": 0.50},
              "2": {"bestBid": 0.50, "bestAsk": 0.50}}
     out = eng.combine(books, {"tokA": 0.90, "tokB": 0.10})
-    assert out["1"] == pytest.approx(0.5 * 0.90 + 0.5 * 0.50, abs=1e-6)
+    assert out["1"] == pytest.approx(0.90, abs=1e-6)
 
 
-def test_anchor_weight_is_validated():
-    with pytest.raises(ValueError):
-        FairValueEngine(xw(), anchor_weight=1.5)
+def test_our_own_book_cannot_move_the_fair_value():
+    """Own-quote feedback: adding depth to our side must not shift fair."""
+    eng = FairValueEngine(xw())
+    thin = {"1": {"bestBid": 0.40, "bestAsk": 0.44, "bidSize": 100,
+                  "askSize": 100},
+            "2": {"bestBid": 0.56, "bestAsk": 0.60, "bidSize": 100,
+                  "askSize": 100}}
+    stacked = {"1": {**thin["1"], "bidSize": 10_000},
+               "2": thin["2"]}
+    mids = {"tokA": 0.42, "tokB": 0.58}
+    assert eng.combine(thin, mids) == eng.combine(stacked, mids)
+
+
+def test_partial_outcome_set_is_not_normalised_to_one():
+    """
+    Nebraska/Montana Senate and Rhode Island Governor carry a real Independent,
+    so P(R) + P(D) < 1. Forcing a partial set to sum to 1 redistributed the
+    Independent's mass: raw R=0.70/D=0.05 came back as 0.933/0.067.
+    """
+    three_way = Crosswalk(
+        token_by_exchange={"r": "tr", "d": "td"},
+        key_by_exchange={"r": ("SENATE", "NEBRASKA", "R"),
+                         "d": ("SENATE", "NEBRASKA", "D"),
+                         "i": ("SENATE", "NEBRASKA", "I")})
+    out = FairValueEngine(three_way).combine({}, {"tr": 0.70, "td": 0.05})
+    assert out["r"] == pytest.approx(0.70)
+    assert out["d"] == pytest.approx(0.05)
+
+
+def test_complete_outcome_set_is_still_devigged():
+    """A fully-mapped two-way race must still have its overround removed."""
+    out = FairValueEngine(xw()).combine({}, {"tokA": 0.60, "tokB": 0.60})
+    assert out["1"] + out["2"] == pytest.approx(1.0)

@@ -12,13 +12,13 @@ Why it matters:
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from .api import ApiError, Client, DryRunBlocked
 from .config import TICK
 from .journal import OrderJournal
-from .risk import collateral
-from .risk import PortfolioState, RiskManager
+from .risk import PortfolioState, RiskManager, collateral
 
 
 @dataclass(frozen=True)
@@ -195,6 +195,20 @@ class Executor:
                 for d in plan.places]
             return result
 
+        # The kill switch is enforced HERE as well as during planning. A Plan
+        # is just data: it can be built before the switch trips and applied
+        # after, and the risk manager is never consulted again on that path.
+        # Cancellations are always allowed -- getting flat is what a tripped
+        # switch wants -- but nothing new may be placed.
+        if self.risk is not None and self.risk.tripped:
+            if plan.places:
+                result["errors"].append(
+                    f"kill switch active ({self.risk.tripped}): "
+                    f"suppressed {len(plan.places)} placement(s)")
+            plan = Plan(cancels=plan.cancels, places=[], keeps=plan.keeps,
+                        vetoed=plan.vetoed)
+            result["kill_switch"] = self.risk.tripped
+
         # Cancel first so capacity and queue slots are freed before re-posting.
         for lo in plan.cancels:
             try:
@@ -254,8 +268,25 @@ class Executor:
             payload = [{"exchangeId": d.exchange_id, "side": d.side,
                         "action": d.action, "quantity": d.quantity,
                         "price": d.price} for d in chunk]
+            # The venue deduplicates on the batch idempotency key, so that key
+            # must be a function of durable state. Letting the client mint a
+            # fresh uuid per call defeats the mechanism entirely: an ambiguous
+            # failure (timeout, 502) leaves the batch possibly landed, and the
+            # retry arrives under a DIFFERENT key, so the venue places it
+            # again. Deriving it from the journal keys -- which are written
+            # before the request and survive a crash -- means any replay of the
+            # same chunk presents the same key and is deduplicated.
+            #
+            # Without a journal there are no durable keys, so fall back to the
+            # order contents. That is still deterministic for an identical
+            # retry, which is the property the venue needs.
+            parts = [k if k else
+                     f"{d.exchange_id}:{d.side}:{d.action}:{d.price}:{d.quantity}"
+                     for k, d in zip(keys, chunk)]
+            batch_key = "sigbot-batch-" + hashlib.sha256(
+                "|".join(parts).encode()).hexdigest()[:32]
             try:
-                resp = self.client.place_batch(payload)
+                resp = self.client.place_batch(payload, idempotency_key=batch_key)
                 result["requests"] += 1
                 rows = resp.get("results", []) if isinstance(resp, dict) else []
                 if rows and len(rows) < len(chunk):

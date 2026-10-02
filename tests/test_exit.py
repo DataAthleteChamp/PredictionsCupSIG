@@ -62,12 +62,24 @@ def test_fresh_short_bids_below_cost_to_close():
 
 
 def test_exit_never_crosses_the_spread():
-    """Paying ~2 ticks of spread to rescue a 1-tick edge is self-defeating."""
+    """
+    Paying ~2 ticks of spread to rescue a 1-tick edge is self-defeating, so an
+    exit must stay strictly passive -- but it must still be QUOTED.
+
+    This previously asserted `desired(v) == []` for a lot bought at 0.30 with
+    the book at 0.60/0.65: a position up 0.30/share was left entirely
+    unquoted because its cost-based target of 0.31 sat below the bid. The
+    cost-based target is a FLOOR, not the price; the correct response is to
+    raise the offer to a passive level and harvest the gain.
+    """
     s = ExitStrategy()
     v = view(quotes={"1": q(bid=0.60, ask=0.65)},
              lots={"1": Lot("1", 100, avg_cost=0.30, age_minutes=5)})
-    # target 0.31 sits below the 0.60 bid -> would cross -> suppressed
-    assert s.desired(v) == []
+    got = s.desired(v)
+    assert len(got) == 1
+    assert got[0].action == "sell"
+    assert got[0].price > 0.60, "must not cross the bid"
+    assert got[0].price < 0.65, "should improve the ask, not sit behind it"
 
 
 # ------------------------------------------------------------ stale exits ---
@@ -318,3 +330,41 @@ def test_parses_trailing_z_and_naive_timestamps():
 def test_unparseable_timestamp_does_not_raise():
     assert _parse_ts("not-a-date") is None
     assert _parse_ts("") is None
+
+
+# ------------------------------- stale inventory that moved in our favour ---
+
+def test_stale_profitable_long_is_still_quoted():
+    """
+    Regression: a long bought at 0.032 whose bid rose to 0.035 produced a
+    stale target of 0.020, below the bid, which the passivity check then
+    discarded. The position stopped being quoted and simply sat there.
+    """
+    px = ExitStrategy._long_exit_price(0.032, 0.035, True, ExitConfig())
+    assert px > 0.035, "stale exit must not sit below the bid"
+    assert px == pytest.approx(0.040)
+
+
+def test_stale_exit_never_scratches_below_the_market():
+    """Selling under the bid gives away a gain we already have."""
+    for cost, bid in ((0.032, 0.035), (0.10, 0.20), (0.50, 0.70)):
+        px = ExitStrategy._long_exit_price(cost, bid, True, ExitConfig())
+        assert px > bid
+
+
+def test_exit_still_refuses_to_chase_a_collapsing_book_down():
+    """The original protection must survive: never clamp DOWN to a bad book."""
+    px = ExitStrategy._long_exit_price(0.066, 0.010, True, ExitConfig())
+    assert px == pytest.approx(0.055), "must hold its cost-based ask"
+
+
+def test_stale_profitable_short_is_still_quoted():
+    """Mirror image: a short whose ask fell below our stale buy-back target."""
+    px = ExitStrategy._short_exit_price(0.90, 0.80, True, ExitConfig())
+    assert px < 0.80, "stale short exit must not sit above the ask"
+    assert px == pytest.approx(0.795)
+
+
+def test_short_exit_still_refuses_to_chase_a_spiking_book_up():
+    px = ExitStrategy._short_exit_price(0.20, 0.90, True, ExitConfig())
+    assert px == pytest.approx(0.21)

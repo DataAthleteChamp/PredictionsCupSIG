@@ -96,11 +96,20 @@ class OrderJournal:
         return key
 
     def record_placed(self, key: str, order_id: int | None) -> None:
-        """Step 3, success."""
+        """
+        Step 3, success.
+
+        An order id is REQUIRED. Ownership is derived from it, so recording
+        PLACED without one produces a row that claims the order succeeded while
+        leaving it permanently unmanageable -- the exact orphan state the
+        journal exists to prevent. A success response without an id is an
+        ambiguous outcome, so the intent stays PENDING for recovery to resolve.
+        """
+        if order_id is None:
+            return
         self.con.execute(
             "UPDATE orders SET status=?, order_id=?, updated_at=? WHERE key=?",
-            (PLACED, int(order_id) if order_id is not None else None,
-             time.time(), key))
+            (PLACED, int(order_id), time.time(), key))
 
     def record_failed(self, key: str, reason: str = "") -> None:
         """Step 3, terminal failure. Not retried on recovery."""

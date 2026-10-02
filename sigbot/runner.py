@@ -170,6 +170,39 @@ def build_races(markets: list[dict], positions: list[dict]) -> tuple[dict, dict]
     return races, party_exchange
 
 
+# Lower sorts FIRST: these are ranks under an ascending sort, not scores.
+#
+# This previously read {"ladder": 3, "relvalue": 2, "sleeve": 1}, which looks
+# like a desirability score but ordered them exit, sleeve, relvalue, ladder --
+# putting the highest-EV strategy LAST. With ~277 ladder desires and 60
+# relvalue against a 150-order cap, every relvalue order survived and ladder
+# absorbed the entire truncation, despite ladder measuring +0.0163 per
+# order-hour at its optimal depth against relvalue's unmeasured edge.
+#
+# Exit leads because it only reduces exposure and the edge it harvests is
+# perishable. Sleeve is last because it is the speculative layer.
+STRATEGY_PRIORITY = {"exit": 0, "pair": 1, "ladder": 2, "relvalue": 3,
+                     "sleeve": 4}
+
+
+def _truncate_by_priority(desired, live, managed, cap):
+    """
+    Cut the desired set to the per-cycle order budget.
+
+    STICKY: a desire that already has one of our resting orders sorts first, so
+    the kept set does not reshuffle every cycle and cancel perfectly good
+    orders merely because a different market entered the top N.
+    """
+    have = {(str(o.exchange_id), o.side, o.action) for o in live
+            if o.order_id in managed}
+    ordered = sorted(desired, key=lambda o: (
+        0 if (str(o.exchange_id), o.side, o.action) in have else 1,
+        STRATEGY_PRIORITY.get(o.strategy, len(STRATEGY_PRIORITY)),
+    ))
+    return ordered[:cap] if len(ordered) > cap else ordered
+
+
+
 def cycle(client: Client, risk: RiskManager, state: dict, *,
           journal: OrderJournal | None = None,
           use_polymarket: bool = True, verbose: bool = True) -> dict:
@@ -239,19 +272,8 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     if journal:
         journal.record_closed(managed - live_ids)   # filled or already cancelled
         managed &= live_ids
-    # Truncate to the per-cycle order budget, but STICKILY: a desire that
-    # already has one of our resting orders is kept first. Without this the
-    # truncated set reshuffles every cycle and the bot cancels and re-places
-    # perfectly good orders simply because a different market entered the top N.
-    priority = {"ladder": 3, "relvalue": 2, "sleeve": 1}
-    have = {(str(o.exchange_id), o.side, o.action) for o in live
-            if o.order_id in managed}
-    desired.sort(key=lambda o: (
-        0 if (str(o.exchange_id), o.side, o.action) in have else 1,
-        priority.get(o.strategy, 0),
-    ))
-    if len(desired) > s.max_orders_per_cycle:
-        desired = desired[:s.max_orders_per_cycle]
+    desired = _truncate_by_priority(desired, live, managed,
+                                    s.max_orders_per_cycle)
 
     plan = plan_orders(desired, live, risk, pstate, managed_order_ids=managed)
     result = Executor(client, risk, journal=journal).apply(plan)

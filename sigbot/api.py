@@ -48,6 +48,15 @@ def _q(value, safe: str = "") -> str:
     return urllib.parse.quote(str(value), safe=safe)
 
 
+class IncompletePagination(RuntimeError):
+    """
+    A paginated walk could not be proven complete.
+
+    Callers infer closure from absence, so a partial list is worse than no
+    list: it looks authoritative while silently orphaning live orders.
+    """
+
+
 class ApiError(RuntimeError):
     def __init__(self, status: int, code: str, message: str, details: Any = None):
         super().__init__(f"{status} {code}: {message}")
@@ -171,17 +180,25 @@ class Client:
     def account(self) -> dict:
         return self.get("/account")
 
-    def open_orders(self, limit: int = 100) -> list[dict]:
+    def open_orders(self, limit: int = 100, max_pages: int = 50) -> list[dict]:
         """
         ALL open orders, paginated.
 
         A single page caps at 100; we routinely want to rest more than that, so
         reading one page would silently hide orders, causing missed cancels and
         duplicate placements.
+
+        Completeness is a correctness requirement, not a nicety: the caller
+        treats a managed order's ABSENCE from this list as proof that it filled
+        or was cancelled, and marks it closed. A truncated list therefore
+        orphans live orders -- the bot forgets them, cannot cancel them, and
+        may re-place duplicates. So an incomplete walk raises rather than
+        returning what it happened to collect.
         """
         out: list[dict] = []
         cursor = None
-        while True:
+        seen: set[str] = set()
+        for _ in range(max_pages):
             p = f"/orders?status=open&limit={limit}"
             if cursor:
                 p += f"&cursor={_q(cursor)}"
@@ -189,9 +206,17 @@ class Client:
             out.extend(d.get("data", []))
             pg = d.get("pagination", {}) or {}
             nxt = pg.get("nextCursor")
-            if not pg.get("hasMore") or not nxt or nxt == cursor:
+            if not pg.get("hasMore"):
                 return out
+            if not nxt or nxt == cursor or nxt in seen:
+                raise IncompletePagination(
+                    f"open_orders: server reports more pages but returned "
+                    f"a repeated or empty cursor after {len(out)} orders")
+            seen.add(nxt)
             cursor = nxt
+        raise IncompletePagination(
+            f"open_orders: exceeded {max_pages} pages ({len(out)} orders) "
+            f"with the server still reporting more")
 
     def positions(self) -> dict:
         return self.get(f"/tournaments/{self.s.tournament_slug}/portfolio/positions")

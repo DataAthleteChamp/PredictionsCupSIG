@@ -261,3 +261,26 @@ def test_batch_retry_reuses_the_same_key_so_it_resumes():
                     "quantity": 1, "price": 0.5}])
     keys = {call["body"]["idempotencyKey"] for call in t.calls}
     assert len(t.calls) == 2 and len(keys) == 1
+
+
+def test_open_orders_paginates_beyond_one_page():
+    """A single page caps at 100; missing orders means missed cancels."""
+    t = FakeTransport([
+        Response(200, {"data": [{"id": i} for i in range(100)],
+                       "pagination": {"hasMore": True, "nextCursor": "c1"}}),
+        Response(200, {"data": [{"id": i} for i in range(100, 150)],
+                       "pagination": {"hasMore": False, "nextCursor": None}}),
+    ])
+    c = Client(make_settings(), transport=t, sleep=lambda s: None)
+    assert len(c.open_orders()) == 150
+    assert len(t.calls) == 2
+
+
+def test_open_orders_stops_on_repeated_cursor():
+    """Guard against a server returning a constant cursor forever."""
+    t = FakeTransport([Response(200, {"data": [{"id": 1}],
+                                      "pagination": {"hasMore": True,
+                                                     "nextCursor": "same"}})] * 10)
+    c = Client(make_settings(), transport=t, sleep=lambda s: None)
+    c.open_orders()
+    assert len(t.calls) <= 3

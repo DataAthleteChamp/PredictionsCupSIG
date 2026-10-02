@@ -84,6 +84,12 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
     order is desired with the same quantity. A quantity change means cancel and
     replace, because the venue has no amend operation.
 
+    Risk is evaluated CUMULATIVELY: each approved order increments a running
+    tally of per-market, per-strategy and total exposure, so a plan of many
+    individually-valid orders cannot collectively breach a budget. Evaluating
+    each order against the same starting state would let 229 small orders blow
+    through a cap that none of them breaches alone.
+
     `managed_order_ids` scopes what the bot is allowed to cancel. Orders placed
     outside the bot (manual experiments, another process) are left strictly
     alone. Pass None to manage everything — only safe when the bot is the sole
@@ -98,11 +104,18 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
     vetoed: list[tuple[DesiredOrder, str]] = []
     matched_ids: set[int] = set()
 
+    # Running tally so cumulative exposure is enforced, not just per-order.
+    running = PortfolioState(
+        balance=state.balance, equity=state.equity, cost_basis=state.cost_basis,
+        peak_equity=state.peak_equity, positions=dict(state.positions),
+        deployed_by_strategy=dict(state.deployed_by_strategy),
+    )
+
     def manageable(o: LiveOrder) -> bool:
         return managed_order_ids is None or o.order_id in managed_order_ids
 
     for d in desired:
-        veto = risk.check(state, exchange_id=d.exchange_id, action=d.action,
+        veto = risk.check(running, exchange_id=d.exchange_id, action=d.action,
                           price=d.price, quantity=d.quantity, strategy=d.strategy)
         if veto is not None:
             vetoed.append((d, veto.reason))
@@ -115,6 +128,13 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
             keeps.append(exact)
         else:
             places.append(d)
+        # Count it either way: a kept order is live exposure too.
+        notional = d.price * d.quantity
+        running.cost_basis += notional
+        running.positions[d.exchange_id] = (
+            running.positions.get(d.exchange_id, 0.0) + d.quantity)
+        running.deployed_by_strategy[d.strategy] = (
+            running.deployed_by_strategy.get(d.strategy, 0.0) + notional)
 
     cancels = [lo for lo in live
                if lo.order_id not in matched_ids and manageable(lo)]
@@ -133,8 +153,12 @@ class Executor:
     def apply(self, plan: Plan, *, dry_run: bool | None = None,
               use_batch: bool = True) -> dict:
         dry = self.client.s.dry_run if dry_run is None else dry_run
+        # placed_order_ids is how ownership is established. It must contain ONLY
+        # ids the venue returned for orders WE submitted. Never infer ownership
+        # from account-level open orders - that would adopt (and later cancel)
+        # orders placed manually or by another process.
         result = {"cancelled": 0, "placed": 0, "errors": [], "dry_run": dry,
-                  "requests": 0}
+                  "requests": 0, "placed_order_ids": []}
         if dry:
             result["would_cancel"] = [o.order_id for o in plan.cancels]
             result["would_place"] = [
@@ -161,10 +185,13 @@ class Executor:
         else:
             for d in plan.places:
                 try:
-                    self.client.place_order(d.exchange_id, d.side, d.action,
-                                            d.quantity, d.price)
+                    resp = self.client.place_order(d.exchange_id, d.side, d.action,
+                                                   d.quantity, d.price)
                     result["placed"] += 1
                     result["requests"] += 1
+                    oid = (resp or {}).get("orderId")
+                    if oid is not None:
+                        result["placed_order_ids"].append(int(oid))
                 except (ApiError, DryRunBlocked) as e:
                     result["errors"].append(f"place {d.exchange_id}@{d.price}: {e}")
         return result
@@ -185,11 +212,14 @@ class Executor:
                 result["requests"] += 1
                 rows = resp.get("results", []) if isinstance(resp, dict) else []
                 if rows:
-                    ok = sum(1 for r in rows if r.get("ok"))
-                    result["placed"] += ok
                     for r in rows:
-                        if not r.get("ok"):
-                            data = r.get("data") or {}
+                        data = r.get("data") or {}
+                        if r.get("ok"):
+                            result["placed"] += 1
+                            oid = data.get("orderId")
+                            if oid is not None:
+                                result["placed_order_ids"].append(int(oid))
+                        else:
                             result["errors"].append(
                                 f"batch item {r.get('index')}: "
                                 f"{data.get('code', r.get('status'))}")

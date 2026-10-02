@@ -160,7 +160,26 @@ class Client:
         return self.get("/account")
 
     def open_orders(self, limit: int = 100) -> list[dict]:
-        return self.get(f"/orders?status=open&limit={limit}").get("data", [])
+        """
+        ALL open orders, paginated.
+
+        A single page caps at 100; we routinely want to rest more than that, so
+        reading one page would silently hide orders, causing missed cancels and
+        duplicate placements.
+        """
+        out: list[dict] = []
+        cursor = None
+        while True:
+            p = f"/orders?status=open&limit={limit}"
+            if cursor:
+                p += f"&cursor={cursor}"
+            d = self.get(p)
+            out.extend(d.get("data", []))
+            pg = d.get("pagination", {}) or {}
+            nxt = pg.get("nextCursor")
+            if not pg.get("hasMore") or not nxt or nxt == cursor:
+                return out
+            cursor = nxt
 
     def positions(self) -> dict:
         return self.get(f"/tournaments/{self.s.tournament_slug}/portfolio/positions")

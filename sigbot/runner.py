@@ -151,10 +151,14 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     plan = plan_orders(desired, live, risk, pstate, managed_order_ids=managed)
     result = Executor(client, risk).apply(plan)
 
-    # Track what we placed so future cycles may manage (and cancel) it.
+    # Ownership comes ONLY from ids the executor actually placed. Reading
+    # account-level open orders here would adopt manually-placed orders and
+    # later cancel them, which must never happen.
     if not result.get("dry_run"):
-        placed = {o["id"] for o in client.open_orders()}
-        state["managed_order_ids"] = sorted(managed | placed)
+        newly = {int(i) for i in result.get("placed_order_ids", [])}
+        still_open = {int(o["id"]) for o in live}
+        # Drop ids that are no longer open (filled or cancelled) to bound growth.
+        state["managed_order_ids"] = sorted((managed & still_open) | newly)
     save_state(state)
 
     if verbose:

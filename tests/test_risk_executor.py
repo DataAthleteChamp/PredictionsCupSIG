@@ -323,3 +323,90 @@ def test_executor_cancels_before_placing():
                 keeps=[], vetoed=[])
     Executor(cl, rm()).apply(plan)
     assert cl.cancelled == [3]
+
+
+# ------------------------------------------ cumulative risk accumulation ----
+
+def test_many_small_orders_cannot_collectively_breach_a_budget():
+    """
+    The bug this guards: evaluating every order against the SAME starting state
+    lets 200 individually-valid orders blow through a cap none of them breaches.
+    """
+    # ladder budget is 35% of 100k = 35,000. Each order is 1,000 notional.
+    desired = [d(exchange_id=str(i), price=0.50, quantity=2000)
+               for i in range(60)]
+    p = plan_orders(desired, [], rm(), state())
+    approved = len(p.places) + len(p.keeps)
+    assert p.vetoed, "some orders must be vetoed once the budget is exhausted"
+    assert approved * 1000 <= 35_000 + 1000
+
+
+def test_cumulative_per_market_cap_across_repeated_orders():
+    """Repeated orders on the SAME market must accumulate toward its cap."""
+    desired = [d(exchange_id="1", price=0.50, quantity=2000) for _ in range(10)]
+    p = plan_orders(desired, [], rm(), state())
+    # per-market cap is 5% of 100k = 5,000 -> at 1,000 each, ~5 fit
+    assert len(p.places) <= 6
+    assert p.vetoed
+
+
+def test_cumulative_accounting_does_not_mutate_caller_state():
+    s = state()
+    before_cost = s.cost_basis
+    before_pos = dict(s.positions)
+    plan_orders([d(), d(exchange_id="2")], [], rm(), s)
+    assert s.cost_basis == before_cost
+    assert s.positions == before_pos
+
+
+def test_kept_orders_still_consume_budget():
+    """A kept resting order is live exposure and must count against the cap."""
+    desired = [d(exchange_id="1", price=0.50, quantity=2000) for _ in range(10)]
+    live = [lo(order_id=1, exchange_id="1", price=0.50, quantity=2000)]
+    p = plan_orders(desired, live, rm(), state(), managed_order_ids={1})
+    assert len(p.keeps) == 1
+    assert p.vetoed            # the keep consumed budget like a place would
+
+
+# ------------------------------------------------------ ownership safety ----
+
+def test_executor_reports_only_ids_it_placed():
+    from sigbot.executor import Executor
+
+    class C(_StubClient):
+        def place_order(self, *a, **k):
+            return {"orderId": 4242}
+
+    cl = C()
+    out = Executor(cl, rm()).apply(Plan([], [d()], [], []))
+    assert out["placed_order_ids"] == [4242]
+
+
+def test_executor_collects_batch_order_ids():
+    from sigbot.executor import Executor
+
+    class C(_StubClient):
+        def place_batch(self, orders, idempotency_key=None):
+            return {"results": [{"ok": True, "index": i,
+                                 "data": {"orderId": 100 + i}}
+                                for i in range(len(orders))]}
+
+    cl = C()
+    out = Executor(cl, rm()).apply(Plan([], [d(), d(price=0.4)], [], []))
+    assert sorted(out["placed_order_ids"]) == [100, 101]
+    assert out["placed"] == 2
+
+
+def test_executor_counts_failed_batch_items_as_errors_not_placed():
+    from sigbot.executor import Executor
+
+    class C(_StubClient):
+        def place_batch(self, orders, idempotency_key=None):
+            return {"results": [{"ok": True, "index": 0, "data": {"orderId": 1}},
+                                {"ok": False, "index": 1,
+                                 "data": {"code": "VALIDATION_ERROR"}}]}
+
+    out = Executor(C(), rm()).apply(Plan([], [d(), d(price=0.4)], [], []))
+    assert out["placed"] == 1
+    assert out["placed_order_ids"] == [1]
+    assert len(out["errors"]) == 1

@@ -252,7 +252,41 @@ def test_quadrature_zero_correlation_is_poisson_binomial():
 def test_markout_sign_and_magnitude():
     assert abs(A.markout(0.23, 0.33, "yes") - 0.10) < 1e-12
     assert abs(A.markout(0.23, 0.18, "yes") + 0.05) < 1e-12
-    assert abs(A.markout(0.60, 0.50, "no") - 0.10) < 1e-12
+
+
+def test_no_fill_is_valued_in_no_space_not_yes_space():
+    """
+    Regression. Buying NO at 0.60 while the YES mid is 0.50 means paying 0.60
+    for a share worth (1 - 0.50) = 0.50. That is a 0.10 LOSS. The old sign-flip
+    form reported +0.10 -- and a test had encoded that, so the bug looked
+    verified.
+    """
+    assert A.markout(0.60, 0.50, "no") == pytest.approx(-0.10)
+
+
+def test_no_fill_markout_matches_the_equivalent_yes_sale():
+    """
+    'buy NO @p' is the engine's canonical form of 'sell YES @(1-p)'. Both
+    descriptions must produce the same markout.
+    """
+    p_no, yes_mid = 0.945, 0.0475
+    buy_no = A.markout(p_no, yes_mid, "no")
+    sell_yes = (1.0 - p_no) - yes_mid          # sold YES at 0.055 vs mid 0.0475
+    assert buy_no == pytest.approx(sell_yes)
+    assert buy_no == pytest.approx(0.0075)
+
+
+def test_markout_is_bounded_by_one():
+    """A per-share markout near +0.90 is arithmetically impossible here."""
+    for px in (0.05, 0.25, 0.50, 0.75, 0.945):
+        for mid in (0.01, 0.2, 0.5, 0.8, 0.99):
+            for side in ("yes", "no"):
+                assert abs(A.markout(px, mid, side)) <= 1.0
+
+
+def test_markout_is_zero_when_filled_at_fair_value():
+    assert A.markout(0.30, 0.30, "yes") == pytest.approx(0.0)
+    assert A.markout(0.70, 0.30, "no") == pytest.approx(0.0)
 
 
 # ------------------------------------------------------------ calibration --

@@ -211,12 +211,20 @@ def markout(fill_price: float, later_mid: float, side: str = "yes") -> float:
     """
     Per-share markout of a BUY fill. Positive means the market moved our way.
 
+    `later_mid` is always the YES-space mid. A 'no' fill's price, however, is
+    quoted in NO space, and a NO share settles at (1 - yes). Comparing a NO
+    price directly against a YES mid mixes frames: it inflates the markout by
+    roughly (1 - 2*mid), which is enough to report a +0.0125 fill as +0.9025.
+
+    So convert the position's value into the frame its price was quoted in,
+    then subtract what we paid.
+
     Cartea-Jaimungal-Penalva: expected per-fill P&L ~= delta - c_adverse.
     A persistently negative markout at horizon h means our quoted distance sits
-    inside the adverse-selection cost at that horizon — widen.
+    inside the adverse-selection cost at that horizon -- widen.
     """
-    sign = 1.0 if side == "yes" else -1.0
-    return (later_mid - fill_price) * sign
+    value = later_mid if side == "yes" else (1.0 - later_mid)
+    return value - fill_price
 
 
 def brier_score(forecasts, outcomes) -> float:

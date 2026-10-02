@@ -345,3 +345,51 @@ def test_bulk_price_ids_keep_their_separator():
     c = Client(make_settings(), transport=t, sleep=lambda s: None)
     c.prices(["1", "2", "3"])
     assert "ids=1,2,3" in t.calls[0]["url"]
+
+
+# ----------------------------------------------- transient network errors ---
+
+def test_transient_network_error_is_retried():
+    """
+    A TimeoutError used to escape on the first occurrence and kill the cycle.
+    One such read stalled the live bot for 2h10m with no trading.
+    """
+    calls = []
+
+    def flaky(method, url, headers, body, timeout):
+        calls.append(url)
+        if len(calls) < 3:
+            raise TimeoutError("read timed out")
+        return Response(200, {"ok": True})
+
+    c = Client(make_settings(), transport=flaky, sleep=lambda s: None)
+    assert c.get("/account") == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_transient_error_eventually_gives_up():
+    def always(method, url, headers, body, timeout):
+        raise TimeoutError("read timed out")
+    c = Client(make_settings(), transport=always, sleep=lambda s: None)
+    with pytest.raises(TimeoutError):
+        c.get("/account")
+
+
+def test_connection_errors_are_also_retried():
+    calls = []
+
+    def flaky(method, url, headers, body, timeout):
+        calls.append(url)
+        if len(calls) < 2:
+            raise ConnectionResetError("peer reset")
+        return Response(200, {"ok": True})
+
+    c = Client(make_settings(), transport=flaky, sleep=lambda s: None)
+    assert c.get("/account") == {"ok": True}
+
+
+def test_request_timeout_is_tight_enough_to_fail_fast():
+    """45s per call across a many-call cycle is far too slow to be useful."""
+    import inspect
+    sig = inspect.signature(Client._call)
+    assert sig.parameters["timeout"].default <= 20.0

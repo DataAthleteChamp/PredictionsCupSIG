@@ -304,3 +304,29 @@ def test_activity_ignores_markets_without_a_last_price():
     st = {}
     update_activity(st, {"1": {"latestPrice": None}})
     assert st["activity"] == {}
+
+
+# ------------------------------------------------------- cycle watchdog ---
+
+def test_cycle_deadline_interrupts_a_wedged_call():
+    """
+    Per-request timeouts bound the gap BETWEEN bytes, not total duration, so a
+    trickling server can hold a read open indefinitely. The watchdog must break
+    a blocking call, not merely measure it afterwards.
+    """
+    import time as _t
+    from sigbot.runner import CycleTimeout, cycle_deadline
+    start = _t.monotonic()
+    with pytest.raises(CycleTimeout):
+        with cycle_deadline(0.25):
+            _t.sleep(10)
+    assert _t.monotonic() - start < 3, "watchdog did not interrupt promptly"
+
+
+def test_cycle_deadline_is_clean_on_success():
+    import time as _t
+    from sigbot.runner import cycle_deadline
+    with cycle_deadline(5):
+        _t.sleep(0.01)
+    with cycle_deadline(5):          # timer must have been cleared
+        _t.sleep(0.01)

@@ -48,6 +48,17 @@ def _q(value, safe: str = "") -> str:
     return urllib.parse.quote(str(value), safe=safe)
 
 
+# Transport-level failures that are worth retrying. These are distinct from
+# HTTP errors: no response was received at all, so the request may or may not
+# have reached the venue. urllib raises a mix of socket and URL errors here.
+TRANSIENT_NETWORK_ERRORS = (
+    TimeoutError,
+    ConnectionError,          # covers reset/aborted/refused
+    urllib.error.URLError,    # DNS, unreachable, TLS handshake
+    OSError,                  # catch-all for socket-level failures
+)
+
+
 class IncompletePagination(RuntimeError):
     """
     A paginated walk could not be proven complete.
@@ -150,16 +161,35 @@ class Client:
         return h
 
     def _call(self, method: str, path: str, *, key: str, body: dict | None = None,
-              max_tries: int = 5, timeout: float = 45.0) -> Any:
+              max_tries: int = 5, timeout: float = 15.0) -> Any:
         payload = json.dumps(body).encode() if body is not None else None
         url = self.s.base_url + path
         delay = 0.2
-        last: ApiError | None = None
+        last: Exception | None = None
         for attempt in range(max_tries):
             self._bucket.take()
             self.request_count += 1
-            resp = self._transport(method, url, self._headers(key, body is not None),
-                                   payload, timeout)
+            try:
+                resp = self._transport(method, url,
+                                       self._headers(key, body is not None),
+                                       payload, timeout)
+            except TRANSIENT_NETWORK_ERRORS as e:
+                # A transport failure is NOT the same as an HTTP error, and it
+                # used to escape this loop on the first occurrence, killing the
+                # cycle. Worse, a socket timeout only bounds the gap BETWEEN
+                # bytes, so a server trickling data holds the connection open
+                # indefinitely: one such read stalled the live bot for 2h10m
+                # before finally raising, with no trading in between.
+                #
+                # Retrying is safe because the payload -- including any
+                # idempotency key -- was serialised before the loop, so a
+                # replay presents the venue with the same key it already saw.
+                last = e
+                if attempt == max_tries - 1:
+                    raise
+                self._sleep(delay)
+                delay = min(delay * 2, 8.0)
+                continue
             if 200 <= resp.status < 300:
                 return resp.body
             err = resp.body.get("error", {}) if isinstance(resp.body, dict) else {}

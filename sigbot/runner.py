@@ -15,9 +15,11 @@ and the bot only ever cancels orders it placed itself.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
+import signal
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -341,6 +343,43 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     return {"equity": equity, "plan": plan, "result": result, "floor": floor}
 
 
+class CycleTimeout(RuntimeError):
+    """A cycle exceeded its wall-clock budget and was abandoned."""
+
+
+@contextlib.contextmanager
+def cycle_deadline(seconds: float):
+    """
+    Hard wall-clock bound on a cycle.
+
+    Per-request timeouts are not sufficient. A socket timeout only limits the
+    gap BETWEEN bytes, so a server trickling data keeps a connection alive
+    indefinitely; one such read stalled the live bot for 2h10m with no trading
+    and no error. Retries do not help either -- they bound each attempt, not
+    the total.
+
+    SIGALRM interrupts the blocking syscall itself, which is the only thing
+    that reliably breaks a wedged read in a single-threaded loop. Quotes older
+    than a couple of minutes are worthless to us anyway: abandoning a slow
+    cycle and starting fresh is strictly better than finishing a stale one.
+    """
+    if not hasattr(signal, "SIGALRM"):             # pragma: no cover
+        yield
+        return
+
+    def _fire(signum, frame):
+        raise CycleTimeout(f"cycle exceeded {seconds:.0f}s budget")
+
+    old = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
@@ -370,14 +409,26 @@ def main() -> None:
         n = journal.adopt(client.open_orders())
         print(f"  adopted {n} orphaned order(s) into the journal")
 
+    consecutive_failures = 0
     while True:
+        started = time.monotonic()
         try:
-            cycle(client, risk, state, journal=journal,
-                  use_polymarket=not args.no_polymarket)
+            with cycle_deadline(args.interval * 1.5):
+                cycle(client, risk, state, journal=journal,
+                      use_polymarket=not args.no_polymarket)
+            consecutive_failures = 0
         except ApiError as e:
+            consecutive_failures += 1
             print(f"[{_now()}] api error: {e}")
         except Exception as e:                      # keep the loop alive
-            print(f"[{_now()}] cycle failed: {type(e).__name__}: {e}")
+            consecutive_failures += 1
+            print(f"[{_now()}] cycle failed after "
+                  f"{time.monotonic() - started:.0f}s: {type(e).__name__}: {e}")
+        if consecutive_failures and consecutive_failures % 5 == 0:
+            # A detached bot that fails silently looks identical to one that is
+            # working. Make sustained failure loud instead of invisible.
+            print(f"[{_now()}] WARNING: {consecutive_failures} consecutive "
+                  f"failed cycles -- not trading")
         if args.once:
             return
         time.sleep(args.interval)

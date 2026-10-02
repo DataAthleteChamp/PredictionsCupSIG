@@ -127,7 +127,8 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
 
     for d in desired:
         veto = risk.check(running, exchange_id=d.exchange_id, action=d.action,
-                          price=d.price, quantity=d.quantity, strategy=d.strategy)
+                          price=d.price, quantity=d.quantity, strategy=d.strategy,
+                          side=d.side)
         if veto is not None:
             vetoed.append((d, veto.reason))
             continue

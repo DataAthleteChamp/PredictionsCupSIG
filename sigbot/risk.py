@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .algos import to_yes_frame
 from .config import RiskLimits, Settings, START_BALANCE
 
 
@@ -79,19 +80,27 @@ class RiskManager:
     # ------------------------------------------------------------- the veto --
 
     def check(self, state: PortfolioState, *, exchange_id: str, action: str,
-              price: float, quantity: int, strategy: str) -> Veto | None:
+              price: float, quantity: int, strategy: str,
+              side: str = "yes") -> Veto | None:
         """Return a Veto if this order must not be placed, else None."""
         if self._tripped:
             return Veto(f"kill switch: {self._tripped}")
         if quantity <= 0:
             return Veto("non-positive quantity")
 
-        if action == "buy":
-            if price < self.limits.no_buy_below:
-                return Veto(f"price {price} below no-buy floor "
+        # The tail guards are statements about YES probability -- we measured
+        # negative markout buying YES below 0.15 -- so they must be applied to
+        # the economic YES trade, not to whatever frame the order is quoted in.
+        # A `no` sell at 0.97 IS a YES buy at 0.03 and must be blocked; a `no`
+        # buy at 0.97 IS a YES sell at 0.03, which is the favourite-longshot
+        # edge we actively want and must not be blocked by a buy-side ceiling.
+        yes_action, yes_price = to_yes_frame(side, action, price)
+        if yes_action == "buy":
+            if yes_price < self.limits.no_buy_below:
+                return Veto(f"price {yes_price} below no-buy floor "
                             f"{self.limits.no_buy_below} (tail markout is negative)")
-            if price > self.limits.no_buy_above:
-                return Veto(f"price {price} above no-buy ceiling "
+            if yes_price > self.limits.no_buy_above:
+                return Veto(f"price {yes_price} above no-buy ceiling "
                             f"{self.limits.no_buy_above}")
 
         held = state.positions.get(exchange_id, 0.0)
@@ -110,7 +119,12 @@ class RiskManager:
 
         if open_qty > 0:
             cap = self.limits.max_per_market_fraction * state.equity
-            existing = abs(held) * price
+            # Existing exposure must be valued in the same frame as the new
+            # order's collateral. A SHORT of n shares at price p risks (1-p)
+            # per share, not p: valuing a short tail at p understates it by up
+            # to 49x in the cheap tail -- exactly where RelValueStrategy sells.
+            existing = (abs(held) * price if held >= 0
+                        else abs(held) * (1.0 - price))
             if existing + notional > cap:
                 return Veto(f"per-market cap: {existing + notional:.2f} > {cap:.2f}")
 

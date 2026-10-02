@@ -452,13 +452,36 @@ def test_tail_sells_exhaust_the_strategy_budget_at_the_right_rate():
 
 
 def test_repeated_sells_cannot_walk_past_the_per_market_cap():
-    """Unsigned accounting let a growing short free its own capacity."""
+    """
+    Unsigned accounting let a growing short free its own capacity.
+
+    Priced in the tail, where RelValue actually sells: a short of YES at 0.02
+    risks 0.98/share, so a 4,000 short already consumes 3,920 of the 5,000
+    per-market cap and only one more 1,000-lot (980) fits.
+
+    This previously used price=0.90, where the OLD `abs(held) * price` formula
+    made the cap look binding (4,000 * 0.90 = 3,600) purely by accident. The
+    real residual risk of a short at 0.90 is 4,000 * 0.10 = 400, so the test
+    was asserting a limit produced by the frame bug rather than by economics.
+    """
     s = state(positions={"1": -4000.0})
-    desired = [d(exchange_id="1", action="sell", price=0.90, quantity=1000,
+    desired = [d(exchange_id="1", action="sell", price=0.02, quantity=1000,
                  strategy="relvalue") for _ in range(12)]
     p = plan_orders(desired, [], rm(), s)
     assert len(p.places) <= 2, f"approved {len(p.places)} sells on top of a short"
     assert p.vetoed
+
+
+def test_short_residual_risk_is_small_when_the_price_is_already_high():
+    """
+    The mirror of the above: a short at 0.90 genuinely has little left to lose,
+    so the cap must NOT bind the way the old formula made it appear to.
+    """
+    s = state(positions={"1": -4000.0})
+    desired = [d(exchange_id="1", action="sell", price=0.90, quantity=1000,
+                 strategy="relvalue") for _ in range(12)]
+    p = plan_orders(desired, [], rm(), s)
+    assert len(p.places) == 12, "correct framing leaves ample room at 0.90"
 
 
 def test_position_reducing_trade_is_not_blocked_by_the_cap():
@@ -571,3 +594,31 @@ def test_deployment_cap_actually_vetoes_at_the_limit():
     v = risk.check(st, exchange_id="1", action="buy", price=0.5,
                    quantity=100, strategy="ladder")
     assert v is not None and "total deployment cap" in v.reason
+
+def test_no_sell_is_a_yes_buy_and_must_face_the_tail_guard():
+    """A no/sell @ 0.97 is economically a YES buy at 0.03, below the floor."""
+    risk = RiskManager(settings())
+    v = risk.check(state(), exchange_id="1", side="no", action="sell",
+                   price=0.97, quantity=100, strategy="ladder")
+    assert v is not None and "floor" in v.reason
+
+def test_no_buy_is_a_yes_sell_and_must_not_face_the_buy_guard():
+    """
+    The mirror: no/buy @ 0.97 == SELL YES @ 0.03. Selling tails is our
+    validated edge and must not be vetoed by a buy-side ceiling.
+    """
+    risk = RiskManager(settings())
+    v = risk.check(state(), exchange_id="1", side="no", action="buy",
+                   price=0.97, quantity=100, strategy="relvalue")
+    assert v is None, f"blocked our own edge trade: {v}"
+
+def test_build_races_converts_short_cost_to_yes_frame():
+    """A short's avgCost is NO-space; the YES entry is its complement."""
+    from sigbot.runner import build_races
+    markets = [{"id": "1", "title": "Will the Republican Party win the Georgia Senate race?",
+                "exchanges": [{"id": "100"}]}]
+    positions = [{"exchangeId": "100", "quantity": -100.0, "avgCost": 0.72}]
+    races, _ = build_races(markets, positions)
+    leg = list(races.values())[0].legs[0]
+    assert leg.avg_cost == pytest.approx(0.28), \
+        f"short entry left in NO frame: {leg.avg_cost}"

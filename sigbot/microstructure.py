@@ -28,31 +28,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .algos import to_yes_frame
+
 
 def _value_in_fill_frame(yes_mid: float, side: str) -> float:
     """Value of one share, expressed in the frame its price was quoted in."""
     return yes_mid if side == "yes" else (1.0 - yes_mid)
-
-
-def to_yes_frame(side: str, action: str, price: float) -> tuple[str, float]:
-    """
-    Restate an order in YES space, where every book quote lives.
-
-    The venue quotes one book per exchange, always in YES terms, but accepts
-    orders on either side. A `no` order's price is in NO space, and buying NO
-    is economically selling YES: `no/buy @ 0.77` is `sell YES @ 0.23`.
-
-    Comparing a NO price directly against a YES book makes a perfectly passive
-    order look like it crosses by a hundred ticks. That mistake has now been
-    made four times in this project -- twice in production code, twice in
-    analysis scripts -- so the conversion lives here and nowhere else.
-
-    Returns (yes_action, yes_price).
-    """
-    if side == "yes":
-        return action, price
-    flipped = "sell" if action == "buy" else "buy"
-    return flipped, 1.0 - price
 
 
 def quote_depth_ticks(side: str, action: str, price: float,

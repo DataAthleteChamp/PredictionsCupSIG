@@ -207,6 +207,28 @@ def one_factor_quadrature(probs, rho: float = 0.25, n_nodes: int = 64):
 
 # ---------------------------------------------------------------- markout ---
 
+def to_yes_frame(side: str, action: str, price: float) -> tuple[str, float]:
+    """
+    Restate an order in YES space, where every book quote lives.
+
+    The venue quotes one book per exchange, always in YES terms, but accepts
+    orders on either side. A `no` order's price is in NO space, and buying NO
+    is economically selling YES: `no/buy @ 0.77` is `sell YES @ 0.23`.
+
+    Comparing a NO price directly against a YES book makes a perfectly passive
+    order look like it crosses by a hundred ticks. That mistake has now been
+    made four times in this project -- twice in production code, twice in
+    analysis scripts -- so the conversion lives here and nowhere else.
+
+    Returns (yes_action, yes_price).
+    """
+    if side == "yes":
+        return action, price
+    flipped = "sell" if action == "buy" else "buy"
+    return flipped, 1.0 - price
+
+
+
 def markout(fill_price: float, later_mid: float, side: str = "yes") -> float:
     """
     Per-share markout of a BUY fill. Positive means the market moved our way.

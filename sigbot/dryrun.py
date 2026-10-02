@@ -15,7 +15,7 @@ import os
 from .api import Client
 from .config import Settings
 from .executor import Executor, LiveOrder, plan_orders
-from .risk import PortfolioState, RiskManager
+from .risk import PortfolioState, RiskManager, collateral
 from .strategies.base import MarketView, Quote
 from .strategies.ladder import LadderStrategy
 from .strategies.relvalue import RelValueStrategy
@@ -86,9 +86,13 @@ def main() -> None:
         print("\nwould place (first 10):")
         for d in plan.places[:10]:
             print(f"  {d.strategy:9} {d.exchange_id:>5} {d.action:>4} "
-                  f"{d.quantity:>5} @ {d.price:.3f}  notional={d.price*d.quantity:7.2f}")
-        total = sum(d.price * d.quantity for d in plan.places)
-        print(f"  total notional if ALL filled: {total:,.2f} "
+                  f"{d.quantity:>5} @ {d.price:.3f}  "
+                  f"notional={collateral(d.action, d.price, d.quantity):7.2f}")
+        # price*quantity understates a tail SELL by up to 49x: selling at 0.02
+        # ties up 0.98/share, not 0.02. Reporting the wrong number here is how
+        # an over-deployed book looks safe.
+        total = sum(collateral(d.action, d.price, d.quantity) for d in plan.places)
+        print(f"  total collateral if ALL filled: {total:,.2f} "
               f"({total/state.equity*100:.2f}% of equity)")
 
     out = Executor(client, risk).apply(plan, dry_run=True)

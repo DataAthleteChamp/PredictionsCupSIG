@@ -161,7 +161,12 @@ def build_races(markets: list[dict], positions: list[dict]) -> tuple[dict, dict]
         # floor computed over a partial set is optimistic.
         rp = races.setdefault(race, RacePosition(race, outcomes, [],
                                                  complete=len(outcomes) >= 2))
-        rp.legs.append(Leg(mt.group(1), float(p["quantity"]), float(p["avgCost"])))
+        # A short's avgCost is quoted in NO space, so the YES entry price is
+        # its complement. Feeding 0.72 where the YES entry is 0.28 corrupts
+        # every settlement floor computed from these legs.
+        qty = float(p["quantity"])
+        avg = float(p["avgCost"])
+        rp.legs.append(Leg(mt.group(1), qty, avg if qty >= 0 else 1.0 - avg))
     return races, party_exchange
 
 

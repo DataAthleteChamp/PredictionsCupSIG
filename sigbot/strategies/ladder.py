@@ -94,7 +94,7 @@ class LadderStrategy:
         c = self.cfg
         out: list[DesiredOrder] = []
         eligible = 0
-        for ex, q in sorted(view.quotes.items()):
+        for ex, q in view.by_activity():
             if eligible >= c.max_markets:
                 break
             if not q.tradeable:

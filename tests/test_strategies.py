@@ -10,9 +10,11 @@ def q(ex="1", bid=0.48, ask=0.50, bs=100.0, aszi=100.0):
     return Quote(ex, bid, ask, bs, aszi)
 
 
-def view(quotes=None, fair=None, positions=None, equity=100_000.0):
+def view(quotes=None, fair=None, positions=None, equity=100_000.0,
+         activity=None):
     return MarketView(quotes=quotes or {}, fair=fair or {},
-                      positions=positions or {}, equity=equity)
+                      positions=positions or {}, equity=equity,
+                      activity=activity or {})
 
 
 # ------------------------------------------------------------------ Quote ---
@@ -251,3 +253,54 @@ def test_ladder_shallow_rung_still_never_improves_the_touch():
     v = view({"1": q(bid=0.4928, ask=0.5072)})
     for o in s.desired(v):
         assert o.price < 0.4928
+
+
+# --------------------------------------------- activity-ranked selection ---
+
+def test_quotes_are_ordered_busiest_first():
+    from sigbot.strategies.base import MarketView
+    v = MarketView(quotes={"1": q(), "2": q(), "3": q()}, fair={},
+                   positions={}, equity=100_000.0,
+                   activity={"1": 0.0, "2": 9.0, "3": 4.0})
+    assert [ex for ex, _ in v.by_activity()] == ["2", "3", "1"]
+
+
+def test_activity_ordering_is_stable_without_scores():
+    """No activity data must fall back to a deterministic order."""
+    from sigbot.strategies.base import MarketView
+    v = MarketView(quotes={"3": q(), "1": q(), "2": q()}, fair={},
+                   positions={}, equity=100_000.0)
+    assert [ex for ex, _ in v.by_activity()] == ["1", "2", "3"]
+
+
+def test_ladder_quotes_the_busiest_markets_under_its_cap():
+    """
+    The capital cap binds, so market CHOICE sets the fill rate. Ranking by
+    exchange id put us in markets holding 12% of venue flow.
+    """
+    from sigbot.strategies.ladder import LadderConfig
+    quotes = {str(i): q(bid=0.48, ask=0.50) for i in range(1, 21)}
+    activity = {str(i): float(i) for i in range(1, 21)}   # 20 is busiest
+    v = view(quotes, activity=activity)
+    s = LadderStrategy(LadderConfig(max_markets=3))
+    got = {o.exchange_id for o in s.desired(v)}
+    assert got == {"20", "19", "18"}
+
+
+def test_activity_score_counts_price_changes_and_decays():
+    from sigbot.runner import update_activity, ACTIVITY_DECAY
+    st = {}
+    update_activity(st, {"1": {"latestPrice": 0.50}, "2": {"latestPrice": 0.30}})
+    assert st["activity"] == {"1": 0.0, "2": 0.0}        # first cycle: baseline
+    update_activity(st, {"1": {"latestPrice": 0.55}, "2": {"latestPrice": 0.30}})
+    assert st["activity"]["1"] == pytest.approx(1.0)     # traded
+    assert st["activity"]["2"] == pytest.approx(0.0)     # did not
+    update_activity(st, {"1": {"latestPrice": 0.55}, "2": {"latestPrice": 0.30}})
+    assert st["activity"]["1"] == pytest.approx(ACTIVITY_DECAY)   # decays
+
+
+def test_activity_ignores_markets_without_a_last_price():
+    from sigbot.runner import update_activity
+    st = {}
+    update_activity(st, {"1": {"latestPrice": None}})
+    assert st["activity"] == {}

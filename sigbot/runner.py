@@ -203,6 +203,44 @@ def _truncate_by_priority(desired, live, managed, cap):
 
 
 
+# Exponential decay per cycle. At a 300s cycle, 0.97 gives a half-life of about
+# 1.9 hours, long enough to be stable across quiet patches but short enough to
+# follow the market as attention rotates between races.
+ACTIVITY_DECAY = 0.97
+
+
+def update_activity(state: dict, quotes_raw: dict) -> dict[str, float]:
+    """
+    Maintain a per-market trading-activity score across cycles.
+
+    A market's `latestPrice` changing between two cycles means it traded. That
+    signal is free -- /exchanges/prices is already fetched for all 237 markets
+    every cycle -- and against real trade counts it scores Spearman rho = +0.92.
+
+    This matters because the capital cap binds: we can only rest ~84 orders, so
+    the choice of WHICH markets sets the fill rate. Ordering by exchange id put
+    us in 29 markets carrying 12% of the venue's flow, with orders in 1 of the
+    20 busiest. Ranking by this score captures 28.7% of flow against 10.3%,
+    where a perfect oracle would get 33.9%.
+    """
+    scores = {k: float(v) for k, v in state.get("activity", {}).items()}
+    last = state.get("last_price", {})
+    now_last = {}
+    for ex, q in quotes_raw.items():
+        lp = q.get("latestPrice")
+        if lp is None:
+            continue
+        now_last[ex] = lp
+        s = scores.get(ex, 0.0) * ACTIVITY_DECAY
+        if ex in last and last[ex] != lp:
+            s += 1.0
+        scores[ex] = s
+    state["activity"] = scores
+    state["last_price"] = now_last
+    return scores
+
+
+
 def cycle(client: Client, risk: RiskManager, state: dict, *,
           journal: OrderJournal | None = None,
           use_polymarket: bool = True, verbose: bool = True) -> dict:
@@ -221,6 +259,7 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     quotes_raw = client.prices(exchange_ids)
     quotes = {ex: Quote(ex, q.get("bestBid"), q.get("bestAsk"))
               for ex, q in quotes_raw.items()}
+    activity = update_activity(state, quotes_raw)
 
     pstate = PortfolioState(
         balance=float(acct["balance"]), equity=equity,
@@ -247,7 +286,8 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
                 print(f"  [warn] fair value unavailable: {e}")
 
     view = MarketView(quotes=quotes, fair=fair, positions=pstate.positions,
-                      equity=equity, lots=build_lots(positions))
+                      equity=equity, lots=build_lots(positions),
+                      activity=activity)
     races, party_exchange = build_races(markets, positions)
     floor = portfolio_floor(list(races.values())) if races else {}
 

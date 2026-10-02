@@ -51,7 +51,7 @@ class RelValueStrategy:
         c = self.cfg
         out: list[DesiredOrder] = []
         used = 0
-        for ex, q in sorted(view.quotes.items()):
+        for ex, q in view.by_activity():
             if used >= c.max_markets:
                 break
             fair = view.fair.get(ex)

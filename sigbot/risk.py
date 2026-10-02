@@ -86,8 +86,6 @@ class RiskManager:
         if quantity <= 0:
             return Veto("non-positive quantity")
 
-        notional = collateral(action, price, quantity)
-
         if action == "buy":
             if price < self.limits.no_buy_below:
                 return Veto(f"price {price} below no-buy floor "
@@ -96,31 +94,41 @@ class RiskManager:
                 return Veto(f"price {price} above no-buy ceiling "
                             f"{self.limits.no_buy_above}")
 
-        cap = self.limits.max_per_market_fraction * state.equity
         held = state.positions.get(exchange_id, 0.0)
-        # A trade that REDUCES an existing position is risk-reducing; charging
-        # it against the cap would block exits.
-        reducing = (held > 0 and action == "sell") or (held < 0 and action == "buy")
-        existing = abs(held) * price
-        if not reducing and existing + notional > cap:
-            return Veto(f"per-market cap: {existing + notional:.2f} > {cap:.2f}")
+        # Split the order into the part that closes existing exposure and the
+        # part that opens new exposure. Only the opening part consumes capital;
+        # charging the closing part against the caps would block exits exactly
+        # when we most need them -- near a cap, or on an oversized position.
+        closing = (held > 0 and action == "sell") or (held < 0 and action == "buy")
+        reduce_qty = min(quantity, abs(held)) if closing else 0
+        open_qty = quantity - reduce_qty
+        notional = collateral(action, price, open_qty)
 
-        if abs(state.positions.get(exchange_id, 0.0)) + quantity > self.limits.max_position_shares:
+        resulting = abs(held - quantity if action == "sell" else held + quantity)
+        if resulting > self.limits.max_position_shares and open_qty > 0:
             return Veto("per-market share cap")
 
-        max_deploy = self.limits.max_deployed_fraction * state.equity
-        if state.cost_basis + notional > max_deploy:
-            return Veto(f"total deployment cap: "
-                        f"{state.cost_basis + notional:.2f} > {max_deploy:.2f}")
+        if open_qty > 0:
+            cap = self.limits.max_per_market_fraction * state.equity
+            existing = abs(held) * price
+            if existing + notional > cap:
+                return Veto(f"per-market cap: {existing + notional:.2f} > {cap:.2f}")
 
-        budget = self.strategy_budget(strategy) * state.equity
-        used = state.deployed_by_strategy.get(strategy, 0.0)
-        if used + notional > budget:
-            return Veto(f"{strategy} budget: {used + notional:.2f} > {budget:.2f}")
+            max_deploy = self.limits.max_deployed_fraction * state.equity
+            if state.cost_basis + notional > max_deploy:
+                return Veto(f"total deployment cap: "
+                            f"{state.cost_basis + notional:.2f} > {max_deploy:.2f}")
+
+            budget = self.strategy_budget(strategy) * state.equity
+            used = state.deployed_by_strategy.get(strategy, 0.0)
+            if used + notional > budget:
+                return Veto(f"{strategy} budget: {used + notional:.2f} > {budget:.2f}")
 
         return None
 
     def strategy_budget(self, strategy: str) -> float:
         b = self.s.budgets
+        # "exit" only ever reduces exposure, so it needs no opening budget; it
+        # is allowed through because open_qty is zero, not because it has funds.
         return {"ladder": b.ladder, "relvalue": b.relvalue,
                 "sleeve": b.sleeve}.get(strategy, 0.0)

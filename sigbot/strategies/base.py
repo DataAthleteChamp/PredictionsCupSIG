@@ -1,7 +1,7 @@
 """Strategy interface. A strategy is a pure function of market state."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..executor import DesiredOrder
@@ -36,6 +36,16 @@ class Quote:
 
 
 @dataclass(frozen=True)
+class Lot:
+    """Aggregated inventory in one market, with the age needed to time exits."""
+
+    exchange_id: str
+    quantity: float                             # signed shares
+    avg_cost: float
+    age_minutes: float = 0.0
+
+
+@dataclass(frozen=True)
 class MarketView:
     """Everything a strategy is allowed to see."""
 
@@ -43,6 +53,9 @@ class MarketView:
     fair: dict[str, float]                      # exchange_id -> external fair value
     positions: dict[str, float]                 # exchange_id -> signed shares
     equity: float
+    # Cost basis and age per market. Optional so existing strategies and their
+    # tests, which only need signed share counts, are unaffected.
+    lots: dict[str, Lot] = field(default_factory=dict)
 
 
 class Strategy(Protocol):

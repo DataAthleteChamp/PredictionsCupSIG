@@ -29,7 +29,8 @@ from .fair import Crosswalk, FairValueEngine, clob_midpoints, sig_key
 from .journal import OrderJournal, recover
 from .portfolio import Leg, RacePosition, portfolio_floor
 from .risk import PortfolioState, RiskManager
-from .strategies.base import MarketView, Quote
+from .strategies.base import Lot, MarketView, Quote
+from .strategies.exit import ExitStrategy
 from .strategies.ladder import LadderStrategy
 from .strategies.pair import PairStrategy
 from .strategies.relvalue import RelValueStrategy
@@ -82,6 +83,58 @@ def fetch_markets(client: Client, max_pages: int = 20) -> list[dict]:
         if not pg.get("hasMore") or not nxt or nxt == cursor:
             return out
         cursor = nxt
+    return out
+
+
+def _parse_ts(value: str) -> datetime | None:
+    """Tolerate the venue's 7-digit fractional seconds and trailing Z."""
+    if not value:
+        return None
+    s = str(value).replace("Z", "+00:00")
+    m = re.match(r"^(.*\.\d{6})\d*(.*)$", s)
+    if m:
+        s = m.group(1) + m.group(2)
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def build_lots(positions: list[dict], now: datetime | None = None) -> dict[str, Lot]:
+    """
+    Normalise raw positions into YES-space lots with an age.
+
+    Two conversions matter and both have bitten us before:
+
+    * `avgCost` is quoted in the frame of the shares actually held. A short is
+      held as NO shares, so its avgCost of 0.72 means a YES entry of 0.28.
+      Feeding the NO-space number into a YES-space exit price would quote the
+      wrong side of the book by (1 - 2p).
+    * Age is quantity-weighted across lots, so one old scrap does not make a
+      mostly-fresh position look stale, nor a fresh top-up refresh an old one.
+    """
+    now = now or datetime.now(timezone.utc)
+    out: dict[str, Lot] = {}
+    for p in positions:
+        qty = float(p.get("quantity") or 0.0)
+        if qty == 0:
+            continue
+        ex = str(p["exchangeId"])
+        avg = float(p.get("avgCost") or 0.0)
+        if qty < 0:                       # held as NO shares -> convert to YES
+            avg = 1.0 - avg
+
+        num = den = 0.0
+        for lot in p.get("lots") or []:
+            ts = _parse_ts(lot.get("openedAt"))
+            if ts is None:
+                continue
+            w = abs(float(lot.get("quantity") or 0.0))
+            num += w * max(0.0, (now - ts).total_seconds() / 60.0)
+            den += w
+        age = num / den if den > 0 else 0.0
+        out[ex] = Lot(exchange_id=ex, quantity=qty, avg_cost=avg, age_minutes=age)
     return out
 
 
@@ -156,15 +209,17 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
                 print(f"  [warn] fair value unavailable: {e}")
 
     view = MarketView(quotes=quotes, fair=fair, positions=pstate.positions,
-                      equity=equity)
+                      equity=equity, lots=build_lots(positions))
     races, party_exchange = build_races(markets, positions)
     floor = portfolio_floor(list(races.values())) if races else {}
 
     # --- strategies -------------------------------------------------------
     desired = []
     counts = {}
-    for strat in (PairStrategy(), LadderStrategy(), RelValueStrategy(),
-                  SleeveStrategy()):
+    # Exit runs first: the measured edge decays to negative by 240 min, so
+    # harvesting existing inventory takes precedence over adding more.
+    for strat in (ExitStrategy(), PairStrategy(), LadderStrategy(),
+                  RelValueStrategy(), SleeveStrategy()):
         got = (strat.desired(view, races, party_exchange)
                if isinstance(strat, PairStrategy) else strat.desired(view))
         counts[type(strat).__name__] = len(got)

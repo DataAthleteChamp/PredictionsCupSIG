@@ -467,3 +467,61 @@ def test_position_reducing_trade_is_not_blocked_by_the_cap():
     v = rm().check(s, exchange_id="1", action="sell", price=0.90,
                    quantity=100, strategy="relvalue")
     assert v is None
+
+
+# ------------------------------------------------------------ hysteresis ----
+
+def test_sub_tick_drift_does_not_churn_the_book():
+    """
+    The ladder recomputes from a moving mid. Without hysteresis a 1-tick drift
+    cancels and replaces every order each cycle, burning rate limit and - worse
+    - surrendering queue position, which is the only thing that fills a passive
+    order under price-time priority.
+    """
+    live = [lo(order_id=1, price=0.500, quantity=100)]
+    p = plan_orders([d(price=0.505, quantity=100)], live, rm(), state(),
+                    managed_order_ids={1})
+    assert p.is_noop and len(p.keeps) == 1
+
+
+def test_large_price_move_still_requotes():
+    live = [lo(order_id=1, price=0.500, quantity=100)]
+    p = plan_orders([d(price=0.560, quantity=100)], live, rm(), state(),
+                    managed_order_ids={1})
+    assert len(p.cancels) == 1 and len(p.places) == 1
+
+
+def test_small_quantity_drift_is_tolerated():
+    live = [lo(order_id=1, price=0.500, quantity=100)]
+    p = plan_orders([d(price=0.500, quantity=108)], live, rm(), state(),
+                    managed_order_ids={1})
+    assert p.is_noop
+
+
+def test_large_quantity_change_requotes():
+    live = [lo(order_id=1, price=0.500, quantity=100)]
+    p = plan_orders([d(price=0.500, quantity=300)], live, rm(), state(),
+                    managed_order_ids={1})
+    assert len(p.cancels) == 1 and len(p.places) == 1
+
+
+def test_tolerance_zero_restores_exact_matching():
+    live = [lo(order_id=1, price=0.500, quantity=100)]
+    p = plan_orders([d(price=0.505, quantity=100)], live, rm(), state(),
+                    managed_order_ids={1}, price_tolerance_ticks=0,
+                    qty_tolerance=0.0)
+    assert len(p.cancels) == 1 and len(p.places) == 1
+
+
+def test_two_desires_do_not_both_match_one_live_order():
+    live = [lo(order_id=1, price=0.500, quantity=100)]
+    p = plan_orders([d(price=0.500, quantity=100), d(price=0.505, quantity=100)],
+                    live, rm(), state(), managed_order_ids={1})
+    assert len(p.keeps) == 1 and len(p.places) == 1
+
+
+def test_hysteresis_never_matches_an_unmanaged_order():
+    live = [lo(order_id=999, price=0.500, quantity=100)]
+    p = plan_orders([d(price=0.502, quantity=100)], live, rm(), state(),
+                    managed_order_ids=set())
+    assert len(p.places) == 1 and p.cancels == []

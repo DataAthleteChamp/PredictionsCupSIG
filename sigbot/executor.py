@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .api import ApiError, Client, DryRunBlocked
+from .config import TICK
 from .journal import OrderJournal
 from .risk import collateral
 from .risk import PortfolioState, RiskManager
@@ -78,13 +79,21 @@ class Plan:
 
 def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
                 risk: RiskManager, state: PortfolioState,
-                managed_order_ids: set[int] | None = None) -> Plan:
+                managed_order_ids: set[int] | None = None,
+                price_tolerance_ticks: int = 1,
+                qty_tolerance: float = 0.15) -> Plan:
     """
     Pure diff. No I/O, fully testable.
 
-    An existing order is KEPT when an identical (exchange, side, action, price)
-    order is desired with the same quantity. A quantity change means cancel and
-    replace, because the venue has no amend operation.
+    An existing order is KEPT when a desired order matches it closely enough.
+
+    Matching uses HYSTERESIS rather than exact equality. The ladder recomputes
+    its targets from a moving mid, so an exact match would cancel and replace
+    nearly every order each cycle for a sub-tick drift - burning rate-limit
+    budget and, worse, surrendering queue position (where price-time priority
+    is the only thing that gets a passive order filled).
+
+    `price_tolerance_ticks` and `qty_tolerance` define "close enough".
 
     Risk is evaluated CUMULATIVELY: each approved order increments a running
     tally of per-market, per-strategy and total exposure, so a plan of many
@@ -122,12 +131,20 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
         if veto is not None:
             vetoed.append((d, veto.reason))
             continue
-        candidates = [lo for lo in live_by_key.get(d.key, [])
-                      if lo.order_id not in matched_ids and manageable(lo)]
-        exact = next((lo for lo in candidates if lo.quantity == d.quantity), None)
-        if exact is not None:
-            matched_ids.add(exact.order_id)
-            keeps.append(exact)
+        tol = price_tolerance_ticks * TICK + 1e-9
+        candidates = [
+            lo for lo in live
+            if lo.order_id not in matched_ids and manageable(lo)
+            and str(lo.exchange_id) == str(d.exchange_id)
+            and lo.side == d.side and lo.action == d.action
+            and abs(lo.price - d.price) <= tol
+            and abs(lo.quantity - d.quantity) <= max(1.0, qty_tolerance * d.quantity)
+        ]
+        # Prefer the closest price, so repeated desires do not all match one order.
+        best = min(candidates, key=lambda lo: abs(lo.price - d.price), default=None)
+        if best is not None:
+            matched_ids.add(best.order_id)
+            keeps.append(best)
         else:
             places.append(d)
         # Count it either way: a kept order is live exposure too.

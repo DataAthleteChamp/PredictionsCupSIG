@@ -46,16 +46,33 @@ class RiskLimits:
 
 @dataclass(frozen=True)
 class StrategyBudget:
-    """Fraction of capital each strategy may deploy. Must sum to 1."""
+    """
+    Barbell allocation. Fractions of EQUITY, must sum to 1.
 
-    ladder: float = 0.35
-    relvalue: float = 0.25
-    reserve: float = 0.40
+    A high-Sharpe core (ladder + relvalue) funds and protects a small convex
+    sleeve. This is the Friedman-Savage "safe layer + aspirational layer" /
+    Black-Perold CPPI structure the literature recommends when the objective is
+    P(reaching a goal) rather than expected wealth.
+
+    The core alone cannot reach a podium ~6x away; the sleeve alone would be
+    paying the longshot premium with the whole stack.
+    """
+
+    ladder: float = 0.30
+    relvalue: float = 0.20
+    sleeve: float = 0.10          # aspirational layer
+    reserve: float = 0.40         # never deployed
+
+    @property
+    def core(self) -> float:
+        return self.ladder + self.relvalue
 
     def validate(self) -> None:
-        total = self.ladder + self.relvalue + self.reserve
+        total = self.ladder + self.relvalue + self.sleeve + self.reserve
         if abs(total - 1.0) > 1e-9:
             raise ValueError(f"budgets must sum to 1.0, got {total}")
+        if self.sleeve > self.core:
+            raise ValueError("sleeve must not exceed the core it is funded by")
 
 
 @dataclass(frozen=True)
@@ -72,6 +89,9 @@ class Settings:
 
     rate_limit_per_min: float = 30.0         # measured safe ~38/min; stay under
     max_concurrency: int = 3                 # 6 workers produced 429s
+    # Bounds how stale the last order in a cycle can be. Measured dislocation
+    # reversion is ~2 min median, so a cycle must stay well inside that.
+    max_orders_per_cycle: int = 150
 
     limits: RiskLimits = field(default_factory=RiskLimits)
     budgets: StrategyBudget = field(default_factory=StrategyBudget)
@@ -90,6 +110,12 @@ class Settings:
             raise RuntimeError("SIG_BASE_URL is not set")
         if not recon:
             raise RuntimeError("SIG_RECON_KEY is not set")
+        # Deployment cap is env-overridable so a live validation run can be
+        # hard-limited well below the normal ceiling.
+        limits = RiskLimits(
+            max_deployed_fraction=_f("SIG_MAX_DEPLOYED_FRACTION", 0.90),
+            max_per_market_fraction=_f("SIG_MAX_PER_MARKET_FRACTION", 0.05),
+        )
         s = cls(
             base_url=base,
             recon_key=recon,
@@ -97,6 +123,8 @@ class Settings:
             dry_run=os.environ.get("DRY_RUN", "true").lower() != "false",
             live_trading=os.environ.get("LIVE_TRADING", "false").lower() == "true",
             rate_limit_per_min=_f("SIG_RATE_LIMIT_PER_MIN", 30.0),
+            max_orders_per_cycle=int(_f("SIG_MAX_ORDERS_PER_CYCLE", 150)),
+            limits=limits,
         )
         s.budgets.validate()
         return s

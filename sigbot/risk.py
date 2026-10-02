@@ -122,4 +122,5 @@ class RiskManager:
 
     def strategy_budget(self, strategy: str) -> float:
         b = self.s.budgets
-        return {"ladder": b.ladder, "relvalue": b.relvalue}.get(strategy, 0.0)
+        return {"ladder": b.ladder, "relvalue": b.relvalue,
+                "sleeve": b.sleeve}.get(strategy, 0.0)

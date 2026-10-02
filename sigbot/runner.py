@@ -33,6 +33,7 @@ from .strategies.base import MarketView, Quote
 from .strategies.ladder import LadderStrategy
 from .strategies.pair import PairStrategy
 from .strategies.relvalue import RelValueStrategy
+from .strategies.sleeve import SleeveStrategy
 
 STATE_PATH = os.environ.get("SIGBOT_STATE", "research/data/bot_state.json")
 
@@ -162,7 +163,8 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     # --- strategies -------------------------------------------------------
     desired = []
     counts = {}
-    for strat in (PairStrategy(), LadderStrategy(), RelValueStrategy()):
+    for strat in (PairStrategy(), LadderStrategy(), RelValueStrategy(),
+                  SleeveStrategy()):
         got = (strat.desired(view, races, party_exchange)
                if isinstance(strat, PairStrategy) else strat.desired(view))
         counts[type(strat).__name__] = len(got)
@@ -177,6 +179,20 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     if journal:
         journal.record_closed(managed - live_ids)   # filled or already cancelled
         managed &= live_ids
+    # Truncate to the per-cycle order budget, but STICKILY: a desire that
+    # already has one of our resting orders is kept first. Without this the
+    # truncated set reshuffles every cycle and the bot cancels and re-places
+    # perfectly good orders simply because a different market entered the top N.
+    priority = {"ladder": 3, "relvalue": 2, "sleeve": 1}
+    have = {(str(o.exchange_id), o.side, o.action) for o in live
+            if o.order_id in managed}
+    desired.sort(key=lambda o: (
+        0 if (str(o.exchange_id), o.side, o.action) in have else 1,
+        priority.get(o.strategy, 0),
+    ))
+    if len(desired) > s.max_orders_per_cycle:
+        desired = desired[:s.max_orders_per_cycle]
+
     plan = plan_orders(desired, live, risk, pstate, managed_order_ids=managed)
     result = Executor(client, risk, journal=journal).apply(plan)
 

@@ -167,3 +167,60 @@ def test_strategies_tag_their_budget_bucket():
                                           fair={"1": 0.75}))
     assert all(o.strategy == "ladder" for o in lad)
     assert all(o.strategy == "relvalue" for o in rel)
+
+
+# ----------------------------------------------------------- convex sleeve --
+
+from sigbot.strategies.sleeve import SleeveConfig, SleeveStrategy
+
+
+def test_sleeve_ignores_cheap_contracts_without_a_discount():
+    """
+    The whole point: do NOT buy a tail just because it is cheap. We measured
+    sub-0.15 buckets markout negative and SIG tails at 1.98x Polymarket.
+    """
+    v = view({"1": q(bid=0.04, ask=0.05)}, fair={"1": 0.05})   # no discount
+    assert SleeveStrategy().desired(v) == []
+
+
+def test_sleeve_buys_a_tail_priced_below_the_anchor():
+    """Contrary to the measured bias => a filtered signal, not a lottery."""
+    v = view({"1": q(bid=0.04, ask=0.05)}, fair={"1": 0.12})
+    out = SleeveStrategy().desired(v)
+    assert len(out) == 1
+    assert out[0].strategy == "sleeve" and out[0].action == "buy"
+    assert out[0].price < 0.05           # passive, never pays the offer
+
+
+def test_sleeve_rejects_insufficient_convexity():
+    """A 0.50 contract pays 2x - not convex enough to matter."""
+    s = SleeveStrategy(SleeveConfig(max_price=0.6, min_multiple=5.0))
+    v = view({"1": q(bid=0.49, ask=0.50)}, fair={"1": 0.70})
+    assert s.desired(v) == []
+
+
+def test_sleeve_concentrates_on_the_best_discounts():
+    quotes = {str(i): q(str(i), 0.04, 0.05) for i in range(20)}
+    fair = {str(i): 0.05 + 0.005 * i for i in range(20)}
+    out = SleeveStrategy(SleeveConfig(max_positions=3)).desired(view(quotes, fair))
+    assert len(out) == 3
+    # the three largest discounts are the highest-index markets
+    assert {o.exchange_id for o in out} == {"19", "18", "17"}
+
+
+def test_sleeve_is_empty_when_no_edge_exists():
+    """An empty sleeve is correct when the edge is absent."""
+    quotes = {str(i): q(str(i), 0.04, 0.05) for i in range(20)}
+    fair = {str(i): 0.03 for i in range(20)}      # SIG richer than anchor
+    assert SleeveStrategy().desired(view(quotes, fair)) == []
+
+
+def test_sleeve_requires_a_fair_value():
+    assert SleeveStrategy().desired(view({"1": q(bid=0.04, ask=0.05)}, fair={})) == []
+
+
+def test_barbell_budgets_validate():
+    from sigbot.config import StrategyBudget
+    StrategyBudget().validate()
+    with pytest.raises(ValueError):
+        StrategyBudget(ladder=0.1, relvalue=0.1, sleeve=0.5, reserve=0.3).validate()

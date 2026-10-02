@@ -292,7 +292,9 @@ def test_short_cost_is_converted_from_no_space_to_yes_space():
 def test_short_exit_uses_the_converted_cost():
     """End to end: the short above must bid just under 0.28, not under 0.72."""
     lots = build_lots([_pos(qty=-89, avg=0.72)], now=NOW)
-    s = ExitStrategy(ExitConfig(target_ticks=2, min_shares=25))
+    # decay is pinned so this exercises the FRAME conversion, not staleness.
+    s = ExitStrategy(ExitConfig(target_ticks=2, min_shares=25,
+                                decay_minutes=10_000))
     v = view(quotes={"1": q(bid=0.25, ask=0.30)}, lots=lots)
     out = s.desired(v)
     assert out[0].action == "buy"
@@ -368,3 +370,30 @@ def test_stale_profitable_short_is_still_quoted():
 def test_short_exit_still_refuses_to_chase_a_spiking_book_up():
     px = ExitStrategy._short_exit_price(0.20, 0.90, True, ExitConfig())
     assert px == pytest.approx(0.21)
+
+
+# ------------------------------- corrected markout timing drives the config ---
+
+def test_decay_matches_the_measured_sign_change():
+    """
+    Tape-timed markout is +0.00217 at 5 min (P=0.98) and -0.00104 at 30 min
+    (P(>0)=0.29), so the edge is gone well before the old 240-minute setting.
+    """
+    assert 5.0 < ExitConfig().decay_minutes < 30.0
+
+
+def test_target_is_not_many_multiples_of_the_measured_edge():
+    """Asking 2 ticks for a 0.43-tick edge meant offers never filled."""
+    assert ExitConfig().target_ticks == 1
+
+
+def test_max_scratch_ticks_is_actually_used():
+    """It was dead config: stale pricing reused target_ticks."""
+    c = ExitConfig(target_ticks=1, max_scratch_ticks=6)
+    px = ExitStrategy._long_exit_price(0.50, None, True, c)
+    assert px == pytest.approx(0.47), "stale scratch must use max_scratch_ticks"
+
+
+def test_fresh_pricing_still_uses_target_ticks():
+    c = ExitConfig(target_ticks=1, max_scratch_ticks=6)
+    assert ExitStrategy._long_exit_price(0.50, None, False, c) == pytest.approx(0.505)

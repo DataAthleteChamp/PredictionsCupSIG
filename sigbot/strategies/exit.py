@@ -1,23 +1,27 @@
 """
 S5 -- inventory exit. Harvests the edge before it decays.
 
-The measurement that forces this strategy to exist (91 fills, corrected for the
-NO/YES frame bug):
+The measurement that forces this strategy to exist (304 fills, recomputed from
+the timestamped tape rather than from live polls -- see
+research/rebuild_markouts.py):
 
-    horizon    mean markout/share    P(edge > 0)
-       1 min        +0.0053             0.96
-       5 min        +0.0063             0.98
-      30 min        +0.0054             0.91
-     240 min        -0.0010             0.44
+    horizon    mean markout/share    P(edge > 0)      n
+       1 min        +0.00150             0.87        283
+       5 min        +0.00217             0.98        279
+      30 min        -0.00104             0.29        282
+     240 min        +0.00004             0.51        172
 
-The edge is real but it is *perishable*. It is worth about one tick and it is
-gone within four hours. Every other strategy in this package only opens
-positions; nothing closed them, so inventory aged past the point where the
-edge had evaporated and we handed it back. That is the mechanism behind the
-guaranteed floor drifting steadily more negative.
+These supersede an earlier table that read +0.0053 to +0.0063 across 1-30
+minutes. That version stamped each fill with the mid at DISCOVERY rather than
+at `filled_at`, and reused one current mid for every horizon that happened to
+be due, which inflated the edge by roughly 7x. The corrected figures are
+confirmed out-of-sample: +0.00217/share on a 71-share average fill predicts
++0.15 per trade, against +0.27 actually realised over 216 trades, while the
+old figures predicted +1.89.
 
-So this strategy does one thing: for inventory we already hold, rest a passive
-offer that takes the edge while it still exists.
+So the edge is real but SMALL -- about four tenths of one tick -- and it
+decays far faster than first believed: it is already negative at 30 minutes,
+not at four hours.
 
 Two regimes, split at the horizon where the measured markout changes sign:
   * **fresh** (younger than `decay_minutes`): ask for the edge -- cost plus
@@ -28,7 +32,7 @@ Two regimes, split at the horizon where the measured markout changes sign:
     we measured. Quote to get flat, down to a bounded scratch loss.
 
 It never crosses the spread. Paying the spread to exit would cost about two
-ticks to save an edge worth one.
+ticks to save an edge worth less than one.
 """
 from __future__ import annotations
 
@@ -42,13 +46,21 @@ from .base import Lot, MarketView
 
 @dataclass(frozen=True)
 class ExitConfig:
-    # Profit target above average cost, in ticks. The measured edge is ~1 tick;
-    # 2 covers the round trip and leaves something over.
-    target_ticks: int = 2
-    # Where the measured markout crosses zero. Past this, stop asking for edge.
-    decay_minutes: float = 240.0
+    # Profit target above average cost, in ticks.
+    #
+    # The measured 5-minute edge is +0.00217/share, which is 0.43 of a tick.
+    # The grid cannot express less than one tick, so 1 is already asking for
+    # roughly 2.3x the mean edge. The previous value of 2 demanded ~5x it, so
+    # offers rarely filled and inventory aged past the point where the edge had
+    # reversed -- the exact failure this strategy exists to prevent.
+    target_ticks: int = 1
+    # Where the measured markout crosses zero. It is positive at 5 minutes
+    # (P=0.98) and already negative at 30 (-0.00104, P(>0)=0.29), so the sign
+    # change lies between. 20 minutes sits inside the positive region with a
+    # margin. This was 240, which was derived from the mis-timed table and held
+    # inventory roughly eight times longer than the edge survives.
+    decay_minutes: float = 20.0
     # Worst scratch we will quote on stale inventory, in ticks below cost.
-    # Equal to target_ticks: staleness flips the sign of the edge we ask for.
     max_scratch_ticks: int = 2
     # Ignore dust.
     min_shares: float = 25.0
@@ -115,7 +127,10 @@ class ExitStrategy:
         above the bid both restores the exit and captures the gain instead of
         scratching beneath it.
         """
-        ticks = -c.target_ticks if stale else c.target_ticks
+        # max_scratch_ticks governs how far BELOW cost stale inventory will
+        # go; target_ticks governs the profit asked while fresh. Reusing
+        # target_ticks for both made max_scratch_ticks dead configuration.
+        ticks = -c.max_scratch_ticks if stale else c.target_ticks
         px = round_to_tick(avg_cost + ticks * TICK)
         if best_bid is not None:
             px = max(px, round_to_tick(best_bid + TICK))
@@ -125,7 +140,7 @@ class ExitStrategy:
     def _short_exit_price(avg_cost: float, best_ask: float | None,
                           stale: bool, c: ExitConfig) -> float | None:
         """Buy price to close a short. Mirror image of the long case."""
-        ticks = c.target_ticks if stale else -c.target_ticks
+        ticks = c.max_scratch_ticks if stale else -c.target_ticks
         px = round_to_tick(avg_cost + ticks * TICK)
         if best_ask is not None:
             px = min(px, round_to_tick(best_ask - TICK))

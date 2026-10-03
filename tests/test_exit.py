@@ -19,11 +19,11 @@ def _s(**kw):
     return Settings(**base)
 
 
-def view(*, quotes=None, lots=None, equity=100_000.0):
+def view(*, quotes=None, lots=None, equity=100_000.0, fair=None):
     quotes = quotes or {}
     lots = lots or {}
     positions = {k: v.quantity for k, v in lots.items()}
-    return MarketView(quotes=quotes, fair={}, positions=positions,
+    return MarketView(quotes=quotes, fair=fair or {}, positions=positions,
                       equity=equity, lots=lots)
 
 
@@ -397,3 +397,50 @@ def test_max_scratch_ticks_is_actually_used():
 def test_fresh_pricing_still_uses_target_ticks():
     c = ExitConfig(target_ticks=1, max_scratch_ticks=6)
     assert ExitStrategy._long_exit_price(0.50, None, False, c) == pytest.approx(0.505)
+
+
+# ------------------------------- settlement edge outranks the perishable one ---
+
+def test_tail_short_with_settlement_edge_is_not_bought_back():
+    """
+    56% of our tail shorts were being round-tripped, 20 of them by this
+    strategy. A short at 0.135 against a Polymarket fair of 0.008 carries a
+    25-tick settlement edge; closing it to capture a sub-tick markout destroys
+    value.
+    """
+    s = ExitStrategy()
+    v = view(quotes={"1": q(bid=0.130, ask=0.140)},
+             lots={"1": Lot("1", -500, avg_cost=0.135, age_minutes=600)},
+             fair={"1": 0.008})
+    assert s.desired(v) == []
+
+
+def test_ordinary_inventory_is_still_exited():
+    """A position with no settlement disagreement must still be harvested."""
+    s = ExitStrategy()
+    v = view(quotes={"1": q(bid=0.48, ask=0.52)},
+             lots={"1": Lot("1", 500, avg_cost=0.50, age_minutes=600)},
+             fair={"1": 0.50})
+    assert len(s.desired(v)) == 1
+
+
+def test_position_on_the_wrong_side_of_fair_is_exited_promptly():
+    """
+    Holding is only justified when the anchor agrees with our direction. A
+    LONG in a market Polymarket prices far below us has negative settlement
+    edge and must not be protected.
+    """
+    s = ExitStrategy()
+    v = view(quotes={"1": q(bid=0.130, ask=0.140)},
+             lots={"1": Lot("1", 500, avg_cost=0.135, age_minutes=600)},
+             fair={"1": 0.008})
+    assert len(s.desired(v)) == 1
+
+
+def test_missing_fair_value_does_not_trap_a_position():
+    """No anchor means no evidence to hold on, so normal exit logic applies."""
+    s = ExitStrategy()
+    v = view(quotes={"1": q(bid=0.130, ask=0.140)},
+             lots={"1": Lot("1", -500, avg_cost=0.135, age_minutes=600)},
+             fair={})
+    assert len(s.desired(v)) == 1

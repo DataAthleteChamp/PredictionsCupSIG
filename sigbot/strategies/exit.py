@@ -65,6 +65,20 @@ class ExitConfig:
     # Ignore dust.
     min_shares: float = 25.0
     # Cap orders per cycle so exits cannot crowd out everything else.
+    # Do not close a position that still carries settlement edge this large.
+    #
+    # This strategy exists to harvest a PERISHABLE edge worth about 0.4 of a
+    # tick, measured over 5-30 minutes. It was also closing positions whose
+    # value comes from settlement rather than from microstructure: 56% of our
+    # tail shorts were bought back, 20 of them by this strategy, discarding a
+    # 12-24 tick edge to capture a sub-tick one.
+    #
+    # A short of a contract SIG prices at 0.135 that Polymarket prices at 0.008
+    # is not inventory to be recycled; it is the favourite-longshot trade, and
+    # it pays on 3 November rather than in half an hour. 0.02 is four ticks --
+    # comfortably above the grind edge, so ordinary inventory is unaffected.
+    hold_if_settlement_edge: float = 0.02
+    # Cap orders per cycle so exits cannot crowd out everything else.
     max_orders: int = 60
 
 
@@ -73,6 +87,18 @@ class ExitStrategy:
 
     def __init__(self, cfg: ExitConfig | None = None):
         self.cfg = cfg or ExitConfig()
+
+    @staticmethod
+    def _settlement_edge(lot, fair: float | None, mid: float | None) -> float:
+        """
+        Edge still available by holding to settlement, in YES space.
+
+        Positive means the market disagrees with the external anchor in the
+        direction our position is already betting on.
+        """
+        if fair is None or mid is None:
+            return 0.0
+        return (mid - fair) if lot.quantity < 0 else (fair - mid)
 
     def desired(self, view: MarketView) -> list[DesiredOrder]:
         c = self.cfg
@@ -85,6 +111,11 @@ class ExitStrategy:
                 continue
             q = view.quotes.get(ex)
             if q is None or not q.tradeable:
+                continue
+
+            # Leave value positions alone. See hold_if_settlement_edge.
+            if self._settlement_edge(lot, view.fair.get(ex),
+                                     q.mid) >= c.hold_if_settlement_edge:
                 continue
 
             stale = lot.age_minutes >= c.decay_minutes

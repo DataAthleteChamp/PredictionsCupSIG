@@ -42,4 +42,21 @@ fi
 
 LOG="research/logs/sigbot-$(date -u +%Y%m%dT%H%M%SZ).log"
 echo "logging to $LOG"
-exec python3 -u -m sigbot.runner "${ARGS[@]}" 2>&1 | tee -a "$LOG"
+
+# Hold off idle sleep for as long as the bot runs.
+#
+# This is not a nicety. On battery the host entered "Maintenance Sleep"
+# repeatedly and the bot managed 10 cycles in 11 hours instead of ~130, losing
+# roughly ten hours of trading. The failures looked like DNS errors
+# ("nodename nor servname provided") because the network returns a moment
+# after the process does, which disguises a host problem as a network one.
+#
+# -i blocks idle sleep, -m keeps the disk awake, -s holds the assertion while
+# running on AC. Closing the lid still sleeps the machine; only AC power plus
+# this keeps it up.
+CAFFEINATE=""
+if command -v caffeinate >/dev/null 2>&1; then
+  CAFFEINATE="caffeinate -ims"
+  echo "sleep inhibited via caffeinate"
+fi
+exec $CAFFEINATE python3 -u -m sigbot.runner "${ARGS[@]}" 2>&1 | tee -a "$LOG"

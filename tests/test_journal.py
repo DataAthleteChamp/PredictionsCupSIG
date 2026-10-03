@@ -323,3 +323,35 @@ def test_placed_without_an_order_id_stays_pending(tmp_path):
     j.record_placed(k, None)
     assert j.managed_order_ids() == set()
     assert [e.key for e in j.pending()] == ["k1"], "must remain recoverable"
+
+
+def test_pending_intents_are_reconciled_not_duplicated(tmp_path):
+    """
+    A batch that times out mid-flight leaves intents PENDING with no order id,
+    so the orders it DID place are invisible to managed_order_ids() and the
+    planner places them again. Measured live: 47 landed, 0 recorded, 47
+    orphaned.
+
+    On a single-tenant account the ambiguity is resolvable: adopt what is live
+    and unmanaged, then retire the pending intents.
+    """
+    j = OrderJournal(str(tmp_path / "j.db"))
+    k1 = j.record_intent("k1", "7", "yes", "buy", 0.3, 10, "ladder")
+    k2 = j.record_intent("k2", "8", "yes", "buy", 0.3, 10, "ladder")
+    assert len(j.pending()) == 2 and j.managed_order_ids() == set()
+
+    live = [_live(501, ex="7"), _live(502, ex="8")]      # they actually landed
+    assert j.adopt(live, strategy="reconciled") == 2
+    for e in j.pending():
+        j.record_failed(e.key)
+
+    assert j.managed_order_ids() == {501, 502}, "live orders must become ours"
+    assert j.pending() == [], "ambiguity must not persist into the next cycle"
+
+
+def test_reconcile_does_not_claim_orders_already_managed(tmp_path):
+    j = OrderJournal(str(tmp_path / "j.db"))
+    k = j.record_intent("k1", "7", "yes", "buy", 0.3, 10, "ladder")
+    j.record_placed(k, 501)
+    assert j.adopt([_live(501, ex="7")], strategy="reconciled") == 0
+    assert j.managed_order_ids() == {501}

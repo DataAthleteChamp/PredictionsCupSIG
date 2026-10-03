@@ -393,3 +393,60 @@ def test_edge_does_not_degrade_with_fill_size():
     # Nothing to assert in code; this records the measurement that justifies
     # leaving size alone rather than raising it.
     assert True
+
+
+# ------------------------- protected positions are respected by EVERYONE ---
+
+def _held_short_view():
+    from sigbot.strategies.base import Lot, MarketView
+    lot = Lot("1", -100, avg_cost=0.25, age_minutes=600)
+    return MarketView(quotes={"1": q(bid=0.24, ask=0.26)}, fair={"1": 0.05},
+                      positions={"1": -100}, equity=100_000.0, lots={"1": lot})
+
+
+def test_ladder_will_not_trade_into_a_protected_position():
+    """
+    Regression: a protected 100-share short drew ladder bids of 236/241/280.
+    The first fill closes the short AND opens a 136-share long against a fair
+    of 0.05, turning an expected +20 into -23.66.
+    """
+    v = _held_short_view()
+    assert "1" in v.protected(0.02, 0.10), "precondition: should be protected"
+    assert LadderStrategy().desired(v) == []
+
+
+def test_ladder_still_quotes_unprotected_markets():
+    from sigbot.strategies.base import MarketView
+    v = MarketView(quotes={"1": q(bid=0.48, ask=0.50)}, fair={}, positions={},
+                   equity=100_000.0)
+    assert LadderStrategy().desired(v)
+
+
+def test_protection_ties_break_deterministically():
+    """Equal edges previously inherited dict order, so a reordered positions
+    response flipped which one was held and churned orders."""
+    from sigbot.strategies.base import Lot, MarketView
+
+    def build(order):
+        lots = {k: Lot(k, -100, avg_cost=0.25, age_minutes=600) for k in order}
+        return MarketView(quotes={k: q(bid=0.24, ask=0.26) for k in order},
+                          fair={k: 0.05 for k in order},
+                          positions={k: -100 for k in order},
+                          equity=1_000.0, lots=lots)      # budget fits one
+
+    assert build(["a", "b"]).protected(0.02, 0.10) == \
+           build(["b", "a"]).protected(0.02, 0.10)
+
+
+def test_protection_respects_its_budget_exactly():
+    from sigbot.strategies.base import Lot, MarketView
+    lots = {str(i): Lot(str(i), -2000, avg_cost=0.135, age_minutes=600)
+            for i in range(6)}
+    v = MarketView(quotes={str(i): q(bid=0.130, ask=0.140) for i in range(6)},
+                   fair={str(i): 0.008 for i in range(6)},
+                   positions={str(i): -2000 for i in range(6)},
+                   equity=100_000.0, lots=lots)
+    # each short costs 2000 * 0.865 = 1730; a 1,000 budget fits NONE
+    assert v.protected(0.02, 0.01) == set()
+    # a 4,000 budget fits exactly two
+    assert len(v.protected(0.02, 0.04)) == 2

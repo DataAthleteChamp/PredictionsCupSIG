@@ -458,8 +458,11 @@ def test_hold_budget_bounds_how_much_capital_is_locked():
     fair = {str(i): 0.008 for i in range(6)}
     out = ExitStrategy(ExitConfig(max_hold_fraction=0.01)).desired(
         view(quotes=quotes, lots=lots, fair=fair))
-    # each short costs ~2000*0.865 = 1730, so at most one fits the budget
-    assert len(out) >= 5, "budget must stop protecting beyond its ceiling"
+    # Each short costs 2000 * 0.865 = 1,730 against a 1,000 budget, so NONE
+    # fit and all six must be exited. The previous `>= 5` accepted one
+    # position being protected in excess of the ceiling -- the exact failure
+    # the budget exists to prevent.
+    assert len(out) == 6, "no position fits a 1,000 budget at 1,730 each"
 
 
 def test_largest_settlement_edge_is_protected_first():
@@ -471,4 +474,7 @@ def test_largest_settlement_edge_is_protected_first():
     s = ExitStrategy(ExitConfig(max_hold_fraction=0.001))  # room for ~1
     got = {o.exchange_id for o in s.desired(view(quotes=quotes, lots=lots,
                                                  fair=fair))}
-    assert "big" not in got, "highest-edge position must be the one protected"
+    # Must be EXACTLY {"small"}. The old `"big" not in got` also passed when
+    # BOTH were protected, which is what the unbounded version did -- so the
+    # test accepted the bug the budget commit was written to remove.
+    assert got == {"small"}

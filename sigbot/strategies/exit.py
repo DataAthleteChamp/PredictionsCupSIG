@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..algos import round_to_tick
-from ..config import MAX_PRICE, MIN_PRICE, TICK
+from ..config import MAX_PRICE, MIN_PRICE, TICK, SETTLEMENT_HOLD_BUDGET, SETTLEMENT_HOLD_EDGE
 from ..executor import DesiredOrder
 from .base import Lot, MarketView
 
@@ -77,7 +77,7 @@ class ExitConfig:
     # is not inventory to be recycled; it is the favourite-longshot trade, and
     # it pays on 3 November rather than in half an hour. 0.02 is four ticks --
     # comfortably above the grind edge, so ordinary inventory is unaffected.
-    hold_if_settlement_edge: float = 0.02
+    hold_if_settlement_edge: float = SETTLEMENT_HOLD_EDGE
     # Ceiling on capital tied up in held value positions, as a fraction of
     # equity.
     #
@@ -91,7 +91,7 @@ class ExitConfig:
     # 10% matches the sleeve budget, which is the layer meant for convex
     # settlement bets and is otherwise unused. Beyond that, positions are
     # harvested normally no matter how attractive their settlement edge.
-    max_hold_fraction: float = 0.10
+    max_hold_fraction: float = SETTLEMENT_HOLD_BUDGET
     # Cap orders per cycle so exits cannot crowd out everything else.
     max_orders: int = 60
 
@@ -117,32 +117,8 @@ class ExitStrategy:
     def desired(self, view: MarketView) -> list[DesiredOrder]:
         c = self.cfg
         out: list[DesiredOrder] = []
-        # Protect the positions with the LARGEST settlement edge first, and
-        # only until the hold budget is used up. Sorting by edge means the
-        # budget buys the most valuable holds rather than whichever markets
-        # happen to sort first.
-        edges = {}
-        for ex, lot in view.lots.items():
-            qq = view.quotes.get(ex)
-            edges[ex] = self._settlement_edge(
-                lot, view.fair.get(ex), qq.mid if qq else None)
-        held = 0.0
-        budget = c.max_hold_fraction * view.equity
-        protected: set[str] = set()
-        for ex in sorted(edges, key=lambda e: -edges[e]):
-            if edges[ex] < c.hold_if_settlement_edge:
-                break
-            lot = view.lots[ex]
-            qq = view.quotes.get(ex)
-            if qq is None or qq.mid is None:
-                continue
-            cost = abs(lot.quantity) * (qq.mid if lot.quantity > 0
-                                        else 1.0 - qq.mid)
-            if held + cost > budget:
-                continue
-            held += cost
-            protected.add(ex)
-
+        protected = view.protected(c.hold_if_settlement_edge,
+                                   c.max_hold_fraction)
         for ex, lot in sorted(view.lots.items()):
             if len(out) >= c.max_orders:
                 break

@@ -314,6 +314,30 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     if journal:
         journal.record_closed(managed - live_ids)   # filled or already cancelled
         managed &= live_ids
+        # Resolve ambiguous placements BEFORE planning anything new.
+        #
+        # A batch that times out mid-flight leaves its intents PENDING with no
+        # order ids, so the orders it actually placed are invisible to
+        # `managed_order_ids()`. The planner then sees its desired state
+        # unfulfilled and places them AGAIN -- measured: 47 orders landed, 0
+        # recorded, 47 orphaned, and a later restart would have placed 47 more.
+        #
+        # On a single-tenant account every open order is ours by definition, so
+        # the ambiguity is resolvable rather than permanent: adopt whatever is
+        # live and unmanaged, then clear the pending intents, because an intent
+        # that did not become a live order never reached the venue.
+        pending = journal.pending()
+        if pending:
+            adopted = journal.adopt([o for o in client.open_orders()
+                                     if int(o["id"]) not in managed],
+                                    strategy="reconciled")
+            journal.record_closed([e.order_id for e in pending
+                                   if e.order_id is not None])
+            for e in pending:
+                journal.record_failed(e.key)
+            managed = journal.managed_order_ids() & live_ids
+            print(f"[{_now()}] reconciled {len(pending)} pending intent(s), "
+                  f"adopted {adopted} live order(s)")
     desired = _truncate_by_priority(desired, live, managed,
                                     s.max_orders_per_cycle)
 

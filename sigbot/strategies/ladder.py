@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..algos import equal_variance_size, round_to_tick
-from ..config import MAX_PRICE, MIN_PRICE
+from ..config import MAX_PRICE, MIN_PRICE, SETTLEMENT_HOLD_BUDGET, SETTLEMENT_HOLD_EDGE
 from ..executor import DesiredOrder
 from .base import MarketView
 
@@ -110,11 +110,17 @@ class LadderStrategy:
     def desired(self, view: MarketView) -> list[DesiredOrder]:
         c = self.cfg
         out: list[DesiredOrder] = []
+        # A position held for its settlement value must not be quoted against.
+        # Buying back a protected short both destroys the hold and opens the
+        # opposite exposure: a 100-share short protected on a 0.05 fair was met
+        # with a 236-share ladder bid, leaving a 136-share long against that
+        # same fair.
+        protected = view.protected(SETTLEMENT_HOLD_EDGE, SETTLEMENT_HOLD_BUDGET)
         eligible = 0
         for ex, q in view.by_activity():
             if eligible >= c.max_markets:
                 break
-            if not q.tradeable:
+            if not q.tradeable or ex in protected:
                 continue
             mid = q.mid
             if mid is None or not (c.min_mid <= mid <= c.max_mid):

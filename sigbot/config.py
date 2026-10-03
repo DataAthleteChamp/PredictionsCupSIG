@@ -172,3 +172,11 @@ class Settings:
         """
         return min(self.limits.max_deployed_fraction, self.budgets.core
                    + self.budgets.sleeve)
+
+
+# Settlement-hold policy. One definition, because every strategy must agree:
+# ExitStrategy decides not to close these, and the opening strategies must not
+# trade into them. When only ExitStrategy knew, Ladder bought back a protected
+# short and opened the opposite exposure in the same cycle.
+SETTLEMENT_HOLD_EDGE = 0.02        # 4 ticks, well above the ~0.4-tick grind edge
+SETTLEMENT_HOLD_BUDGET = 0.10      # fraction of equity; matches the sleeve budget

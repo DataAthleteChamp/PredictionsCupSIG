@@ -798,3 +798,25 @@ def test_exit_outranks_everything():
                + [d(exchange_id="999", strategy="exit")])
     kept = _truncate_by_priority(desired, [], set(), 1)
     assert [o.strategy for o in kept] == ["exit"]
+
+
+def test_deployment_cap_matches_the_configuration_it_must_fund():
+    """
+    The cap is sized to the book the strategies can actually produce, not
+    picked round:
+
+        full resting book  240 orders x ~73 collateral = 17.4%
+                           (240 = 80 markets x 3 rungs = the edge ceiling)
+        peak inventory observed                          7.1%
+        total                                           24.5%
+
+    Beyond that the order cap binds first, so extra capital buys no extra
+    orders -- markets past rank 80 measured +0.00067/share with P(>0)=0.673
+    and our own fills there lost money.
+    """
+    s = settings(limits=RiskLimits(max_deployed_fraction=0.25))
+    assert s.max_deployable_fraction == 0.25
+    orders, collat_each, peak_inventory = 240, 73, 0.071
+    book = orders * collat_each / 100_000
+    assert book + peak_inventory <= 0.25 + 1e-9, "cap cannot fund its own book"
+    assert book + peak_inventory > 0.20, "20% was genuinely too small"

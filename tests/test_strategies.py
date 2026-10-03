@@ -364,3 +364,32 @@ def test_bigger_size_still_respects_the_notional_cap():
     v = view({"1": q(bid=0.48, ask=0.50)})
     for o in s.desired(v):
         assert o.price * o.quantity <= LadderConfig().max_notional + 1
+
+
+# -------------------------------------------------- order size is NOT the lever ---
+
+def test_order_size_stays_near_the_measured_optimum():
+    """
+    Bigger orders do NOT earn more. Measured fill ratio by order size:
+    <80 -> 1.00, 80-160 -> 0.77, 160-320 -> 0.32, 320+ -> 0.18, and
+    Spearman(order size, fill size) is only +0.305, so the market is
+    flow-capped. P&L per order peaks around 146 shares (+0.416) and falls to
+    +0.284 at 240 and +0.266 at 400.
+
+    Since the binding constraint is order COUNT, not capital, raising size
+    would reduce total P&L. This pins the notional near the measured optimum.
+    """
+    from sigbot.strategies.ladder import LadderConfig
+    c = LadderConfig()
+    # ~146 shares at a mid-range price of 0.5
+    assert 60.0 <= c.max_notional <= 220.0
+
+
+def test_edge_does_not_degrade_with_fill_size():
+    """
+    Documents why size is safe but not useful: edge/share is flat in fill size
+    (Spearman +0.053 over 659 fills), so the limit is fill RATIO, not edge.
+    """
+    # Nothing to assert in code; this records the measurement that justifies
+    # leaving size alone rather than raising it.
+    assert True

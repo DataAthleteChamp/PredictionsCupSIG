@@ -78,6 +78,20 @@ class ExitConfig:
     # it pays on 3 November rather than in half an hour. 0.02 is four ticks --
     # comfortably above the grind edge, so ordinary inventory is unaffected.
     hold_if_settlement_edge: float = 0.02
+    # Ceiling on capital tied up in held value positions, as a fraction of
+    # equity.
+    #
+    # The hold rule must be BOUNDED. Held positions never close, so an
+    # unbounded rule accumulates them until they crowd out the grind -- and
+    # the grind is worth far more per unit of capital, because it recycles:
+    # roughly 60% over the remaining 31 days against 7.2% for a position
+    # locked until settlement, about 8x. The grind still wants capital (28
+    # orders vetoed last cycle), so the two genuinely compete.
+    #
+    # 10% matches the sleeve budget, which is the layer meant for convex
+    # settlement bets and is otherwise unused. Beyond that, positions are
+    # harvested normally no matter how attractive their settlement edge.
+    max_hold_fraction: float = 0.10
     # Cap orders per cycle so exits cannot crowd out everything else.
     max_orders: int = 60
 
@@ -103,6 +117,32 @@ class ExitStrategy:
     def desired(self, view: MarketView) -> list[DesiredOrder]:
         c = self.cfg
         out: list[DesiredOrder] = []
+        # Protect the positions with the LARGEST settlement edge first, and
+        # only until the hold budget is used up. Sorting by edge means the
+        # budget buys the most valuable holds rather than whichever markets
+        # happen to sort first.
+        edges = {}
+        for ex, lot in view.lots.items():
+            qq = view.quotes.get(ex)
+            edges[ex] = self._settlement_edge(
+                lot, view.fair.get(ex), qq.mid if qq else None)
+        held = 0.0
+        budget = c.max_hold_fraction * view.equity
+        protected: set[str] = set()
+        for ex in sorted(edges, key=lambda e: -edges[e]):
+            if edges[ex] < c.hold_if_settlement_edge:
+                break
+            lot = view.lots[ex]
+            qq = view.quotes.get(ex)
+            if qq is None or qq.mid is None:
+                continue
+            cost = abs(lot.quantity) * (qq.mid if lot.quantity > 0
+                                        else 1.0 - qq.mid)
+            if held + cost > budget:
+                continue
+            held += cost
+            protected.add(ex)
+
         for ex, lot in sorted(view.lots.items()):
             if len(out) >= c.max_orders:
                 break
@@ -113,9 +153,8 @@ class ExitStrategy:
             if q is None or not q.tradeable:
                 continue
 
-            # Leave value positions alone. See hold_if_settlement_edge.
-            if self._settlement_edge(lot, view.fair.get(ex),
-                                     q.mid) >= c.hold_if_settlement_edge:
+            # Leave value positions alone, within the hold budget.
+            if ex in protected:
                 continue
 
             stale = lot.age_minutes >= c.decay_minutes

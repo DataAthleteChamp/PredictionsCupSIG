@@ -444,3 +444,31 @@ def test_missing_fair_value_does_not_trap_a_position():
              lots={"1": Lot("1", -500, avg_cost=0.135, age_minutes=600)},
              fair={})
     assert len(s.desired(v)) == 1
+
+
+def test_hold_budget_bounds_how_much_capital_is_locked():
+    """
+    Held positions never close, so an unbounded rule crowds out the grind,
+    which is worth ~8x more per unit of capital because it recycles.
+    """
+    s = ExitStrategy(ExitConfig(max_hold_fraction=0.01))   # 1,000 of 100k
+    lots = {str(i): Lot(str(i), -2000, avg_cost=0.135, age_minutes=600)
+            for i in range(6)}
+    quotes = {str(i): q(bid=0.130, ask=0.140) for i in range(6)}
+    fair = {str(i): 0.008 for i in range(6)}
+    out = ExitStrategy(ExitConfig(max_hold_fraction=0.01)).desired(
+        view(quotes=quotes, lots=lots, fair=fair))
+    # each short costs ~2000*0.865 = 1730, so at most one fits the budget
+    assert len(out) >= 5, "budget must stop protecting beyond its ceiling"
+
+
+def test_largest_settlement_edge_is_protected_first():
+    """The budget should buy the most valuable holds, not arbitrary ones."""
+    lots = {"big": Lot("big", -100, avg_cost=0.135, age_minutes=600),
+            "small": Lot("small", -100, avg_cost=0.135, age_minutes=600)}
+    quotes = {"big": q(bid=0.130, ask=0.140), "small": q(bid=0.130, ask=0.140)}
+    fair = {"big": 0.008, "small": 0.100}        # big has far more edge
+    s = ExitStrategy(ExitConfig(max_hold_fraction=0.001))  # room for ~1
+    got = {o.exchange_id for o in s.desired(view(quotes=quotes, lots=lots,
+                                                 fair=fair))}
+    assert "big" not in got, "highest-edge position must be the one protected"

@@ -10,6 +10,12 @@ def q(ex="1", bid=0.48, ask=0.50, bs=100.0, aszi=100.0):
     return Quote(ex, bid, ask, bs, aszi)
 
 
+def d(exchange_id="1", side="yes", action="buy", price=0.5,
+      quantity=10, strategy="ladder"):
+    from sigbot.executor import DesiredOrder
+    return DesiredOrder(exchange_id, side, action, price, quantity, strategy)
+
+
 def view(quotes=None, fair=None, positions=None, equity=100_000.0,
          activity=None):
     return MarketView(quotes=quotes or {}, fair=fair or {},
@@ -450,3 +456,46 @@ def test_protection_respects_its_budget_exactly():
     assert v.protected(0.02, 0.01) == set()
     # a 4,000 budget fits exactly two
     assert len(v.protected(0.02, 0.04)) == 2
+
+
+# ---------------------------------- sizing must be asserted on OUTPUT, not config ---
+
+def test_ladder_order_sizes_land_in_the_efficient_fill_band():
+    """
+    The previous test only checked max_notional <= 220, which the config
+    satisfied while every GENERATED order was 200-280 shares -- the measured
+    32%-fill band. Assert the quantity the strategy actually emits.
+    """
+    s = LadderStrategy()
+    for price in (0.20, 0.35, 0.50, 0.70, 0.90):
+        v = view({"1": q(bid=price, ask=price + 0.01)})
+        for o in s.desired(v):
+            assert o.quantity <= 160, (
+                f"{o.quantity} shares at mid {price} is in the 32%-fill band")
+
+
+def test_notional_cap_alone_cannot_bound_share_count():
+    """
+    Documents WHY a share clamp is needed: max_notional binds on cash, which is
+    tiny for cheap contracts, so it permits huge share counts there.
+    """
+    from sigbot.algos import equal_variance_size
+    n = equal_variance_size(0.15, 100.0, 200.0)
+    assert n > 250 and 0.15 * n < 50, "cheap contracts evade a notional cap"
+
+
+def test_exit_is_never_truncated_by_sticky_ladder_orders():
+    """
+    Stickiness previously outranked priority, so a full book of resting ladder
+    orders pushed a new exit out of the cap and stranded inventory.
+    """
+    from sigbot.executor import LiveOrder
+    from sigbot.runner import _truncate_by_priority
+    ladders = [d(exchange_id=str(i), strategy="ladder") for i in range(240)]
+    live = [LiveOrder.from_api({"id": i, "exchangeId": str(i), "side": "yes",
+                                "action": "buy", "quantity": 10,
+                                "priceLimit": 0.5}) for i in range(240)]
+    managed = {i for i in range(240)}
+    exit_order = d(exchange_id="999", strategy="exit")
+    kept = _truncate_by_priority(ladders + [exit_order], live, managed, 240)
+    assert any(o.strategy == "exit" for o in kept), "exit evicted by sticky ladders"

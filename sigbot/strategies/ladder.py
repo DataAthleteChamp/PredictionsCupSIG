@@ -93,6 +93,19 @@ class LadderConfig:
     # additional capital goes into size instead.
     size_scale: float = 100.0
     max_notional: float = 200.0
+    # Hard share ceiling, applied AFTER equal_variance_size.
+    #
+    # Neither existing knob bounds share count. equal_variance_size returns
+    # min(scale/sqrt(p(1-p)), max_notional/p), and across 0.15-0.95 that is
+    # 200-280 shares -- every single order landed in the measured 32%-fill
+    # band, not the ~146-share P&L/order optimum the sizing change was aiming
+    # for. max_notional cannot fix it because it binds on CASH, which is small
+    # for cheap contracts: at p=0.15 a 42 notional order is still 280 shares.
+    #
+    # It also falsified the 25% cap arithmetic. The generated ladder book was
+    # 24,852 against the 17,520 the cap was sized for, so with inventory the
+    # real requirement was ~32%, not 24.5%. Clamping restores it to 16,935.
+    max_shares: int = 150
     # The evidence-backed ceiling. Past this the edge is indistinguishable from
     # zero and our own fills there lost money, so additional capital must not
     # buy additional markets.
@@ -135,7 +148,9 @@ class LadderStrategy:
                 # Must stay strictly passive: never cross, never improve the touch.
                 if q.best_bid is not None and px >= q.best_bid:
                     continue
-                qty = equal_variance_size(px, c.size_scale, c.max_notional)
+                qty = min(equal_variance_size(px, c.size_scale,
+                                              c.max_notional),
+                          c.max_shares)
                 out.append(DesiredOrder(exchange_id=ex, side="yes", action="buy",
                                         price=px, quantity=qty, strategy=self.name))
         return out

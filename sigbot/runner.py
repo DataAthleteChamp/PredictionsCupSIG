@@ -197,9 +197,15 @@ def _truncate_by_priority(desired, live, managed, cap):
     """
     have = {(str(o.exchange_id), o.side, o.action) for o in live
             if o.order_id in managed}
+    # Priority FIRST, stickiness only as a tie-break within a priority class.
+    #
+    # Sorting stickiness first let 240 already-resting ladder orders push a new
+    # exit out of the cap entirely, stranding inventory whose edge turns
+    # negative after 30 minutes. Anti-churn is worth having, but never at the
+    # cost of the strategy that reduces exposure.
     ordered = sorted(desired, key=lambda o: (
-        0 if (str(o.exchange_id), o.side, o.action) in have else 1,
         STRATEGY_PRIORITY.get(o.strategy, len(STRATEGY_PRIORITY)),
+        0 if (str(o.exchange_id), o.side, o.action) in have else 1,
     ))
     return ordered[:cap] if len(ordered) > cap else ordered
 

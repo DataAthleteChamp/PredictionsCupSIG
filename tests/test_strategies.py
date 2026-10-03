@@ -330,3 +330,37 @@ def test_cycle_deadline_is_clean_on_success():
         _t.sleep(0.01)
     with cycle_deadline(5):          # timer must have been cleared
         _t.sleep(0.01)
+
+
+# ------------------------------------------- scaling into size, not breadth ---
+
+def test_ladder_breadth_stops_at_the_measured_edge_ceiling():
+    """
+    Edge by market activity rank: top 30 +0.00199 (P=0.955), 31-80 +0.00250
+    (P=0.957), 81-150 +0.00067 (P=0.673) with NEGATIVE realised P&L. Extra
+    capital must not buy markets past that ceiling.
+    """
+    from sigbot.strategies.ladder import LadderConfig
+    assert LadderConfig().max_markets <= 80
+
+
+def test_extra_capital_goes_into_size():
+    """Per-share edge is flat in fill size (rho +0.14), so size scales safely."""
+    from sigbot.strategies.ladder import LadderConfig
+    c = LadderConfig()
+    assert c.max_notional >= 200.0 and c.size_scale >= 100.0
+
+
+def test_relvalue_scales_less_than_ladder():
+    """Its measured edge is the weakest of the three (P(>0)=0.624)."""
+    from sigbot.strategies.ladder import LadderConfig
+    from sigbot.strategies.relvalue import RelValueConfig
+    assert RelValueConfig().max_notional < LadderConfig().max_notional
+
+
+def test_bigger_size_still_respects_the_notional_cap():
+    from sigbot.strategies.ladder import LadderConfig
+    s = LadderStrategy()
+    v = view({"1": q(bid=0.48, ask=0.50)})
+    for o in s.desired(v):
+        assert o.price * o.quantity <= LadderConfig().max_notional + 1

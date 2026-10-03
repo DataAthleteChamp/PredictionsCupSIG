@@ -77,9 +77,26 @@ class LadderConfig:
     max_mid: float = 0.85
     # Never bid inside this price, regardless of offset (tail markout negative).
     floor_price: float = 0.15
-    size_scale: float = 40.0
-    max_notional: float = 80.0
-    max_markets: int = 120
+    # Sizing. Raised together with the 20% deployment cap.
+    #
+    # Extra capital can be spent two ways: more markets, or more size in the
+    # markets we already like. The measurement says size, decisively.
+    #
+    #   market rank   edge/share   P(>0)    realised P&L
+    #     top 30       +0.00199    0.955       +35.04
+    #     31-80        +0.00250    0.957       +14.41
+    #     81-150       +0.00067    0.673       -11.37
+    #
+    # Edge survives past rank 80 only barely and then turns negative, while
+    # per-share edge is essentially flat in fill size up to ~150 shares
+    # (Spearman +0.14). So breadth is capped at the measured ceiling and the
+    # additional capital goes into size instead.
+    size_scale: float = 100.0
+    max_notional: float = 200.0
+    # The evidence-backed ceiling. Past this the edge is indistinguishable from
+    # zero and our own fills there lost money, so additional capital must not
+    # buy additional markets.
+    max_markets: int = 80
     # Skip a market if we already hold this many shares.
     max_existing_shares: float = 5_000.0
 

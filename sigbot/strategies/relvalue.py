@@ -35,8 +35,11 @@ class RelValueConfig:
     buy_max_price: float = 0.95
     # Selling the tail is the point of the strategy, so allow it lower.
     sell_min_price: float = 0.02
-    size_scale: float = 30.0
-    max_notional: float = 60.0
+    # Raised with the 20% deployment cap. Relvalue's measured per-share edge
+    # is the weakest of the three (+0.00050, P(>0)=0.624), so it scales less
+    # aggressively than the ladder and keeps its narrower market count.
+    size_scale: float = 60.0
+    max_notional: float = 120.0
     max_markets: int = 60
     max_existing_shares: float = 5_000.0
 

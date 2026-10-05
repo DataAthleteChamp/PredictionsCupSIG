@@ -34,44 +34,28 @@ from .base import MarketView
 class LadderConfig:
     # Offsets below mid, in probability points. 1 tick = 0.005.
     #
-    # Measured EV/order-hour by depth (corrected markout x fitted fill rate,
-    # 10k bootstrap over our own fills):
+    # SETTLED EXPERIMENT. Quoting at 3, 6 and 20 ticks simultaneously was a
+    # deliberate test, because a two-parameter queue model fitted to two points
+    # could not distinguish geometric from power-law decay. 688 ladder fills
+    # later:
     #
-    #     depth below mid   n    EV/order-hr   95% CI            P(best)
-    #     inside/at mid    30    +0.00035      [-0.0106,+0.0122]   0.9%
-    #     0-1 ticks       148    +0.00821      [+0.0028,+0.0132]   2.9%
-    #     2-3 ticks        19    +0.01633      [+0.0085,+0.0228]  87.3%
-    #     4-6 ticks         4    +0.00281      [-0.0143,+0.0200]   8.8%
-    #     13+ ticks         6    +0.00364      [+0.0033,+0.0040]   0.0%
+    #     rung    fills   share of fills   edge/share   P&L
+    #     ~3t       641        93.2%        +0.00405   +389.6
+    #     ~6t        47         6.8%        +0.01883   +132.8
+    #     ~20t        0            0%              --       --
     #
-    # THAT 87.3% IS NOT TRUSTWORTHY. The bootstrap resampled markouts but held
-    # the fill rate fixed, and that rate comes from a two-parameter queue model
-    # fitted to exactly TWO points (1 tick -> 3.17/hr, 20 ticks -> 0.025/hr).
-    # Zero residual degrees of freedom means the functional form is assumed,
-    # not measured. A power law fits the same two anchors exactly and implies
-    # very different rates in between:
+    # The deep rung produced ZERO fills while holding about a third of the
+    # order slots and their capital -- roughly 48 dead orders. The power law
+    # predicted ~62 fills there and geometric ~10, so geometric wins and even
+    # it was optimistic about depth. The "dislocation capture" rationale for a
+    # deep rung is simply false on this venue: dislocations never travel 20
+    # ticks before someone else takes them.
     #
-    #     ticks   geometric   power law
-    #         3      1.904       0.537
-    #         6      0.886       0.175
-    #        30      0.002       0.013
-    #
-    # Under the power law the 2-3 tick bucket's P(best) collapses to ~10% and
-    # the optimum moves to 1 tick. So the precise optimum is UNIDENTIFIED.
-    #
-    # What IS robust: both forms agree the previous (0.08, 0.15) offsets -- 16
-    # and 30 ticks, where fills arrive roughly once per 500 order-hours -- are
-    # far from optimal. The disagreement is only between 1 and 3 ticks, both
-    # shallow. These offsets therefore straddle the disagreement rather than
-    # betting on one form, and quoting at 3, 6 and 20 ticks simultaneously is a
-    # deliberate experiment: three depths overidentify the two-parameter model,
-    # so the next refit can settle the functional form from our own fills
-    # instead of assuming it.
-    #
-    # The deep rung also earns its place independently: resting is free and
-    # deep fills carry a much larger per-fill markout (+0.070/share) from
-    # dislocation reversion, uncorrelated with the shallow rungs' edge.
-    offsets: tuple[float, ...] = (0.015, 0.03, 0.10)
+    # Per order slot the shallow rung is worth about 3x the middle one (4.93
+    # against 1.68), so the freed slots go shallow rather than being retired.
+    # The three rungs still catch progressively larger moves, just inside the
+    # range where fills actually happen.
+    offsets: tuple[float, ...] = (0.015, 0.02, 0.03)
     # Only quote markets whose mid sits in this band.
     min_mid: float = 0.20
     max_mid: float = 0.85

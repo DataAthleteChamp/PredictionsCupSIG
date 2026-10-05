@@ -247,9 +247,20 @@ def test_ladder_quotes_near_the_measured_ev_optimum():
     assert 0.010 <= shallowest <= 0.020          # 2-4 ticks
 
 
-def test_ladder_keeps_a_deep_rung_for_dislocations():
+def test_ladder_has_no_dead_deep_rung():
+    """
+    The 20-tick rung produced 0 fills out of 688 while holding a third of the
+    order slots. Dislocations never travel that far before someone else takes
+    them, so the "deep rung catches dislocations" rationale is false here.
+    """
     from sigbot.strategies.ladder import LadderConfig
-    assert max(LadderConfig().offsets) >= 0.05
+    assert max(LadderConfig().offsets) <= 0.035, "deep rung never fills"
+
+
+def test_all_rungs_sit_where_fills_actually_happen():
+    from sigbot.strategies.ladder import LadderConfig
+    for off in LadderConfig().offsets:
+        assert 2 <= off / 0.005 <= 7, f"{off} is outside the productive band"
 
 
 def test_ladder_shallow_rung_still_never_improves_the_touch():

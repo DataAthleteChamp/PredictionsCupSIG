@@ -123,12 +123,27 @@ class LadderStrategy:
     def desired(self, view: MarketView) -> list[DesiredOrder]:
         c = self.cfg
         out: list[DesiredOrder] = []
-        # A position held for its settlement value must not be quoted against.
-        # Buying back a protected short both destroys the hold and opens the
+        # A position held for its settlement value must not be CLOSED by a
+        # quote. Buying back a protected short destroys the hold and opens the
         # opposite exposure: a 100-share short protected on a 0.05 fair was met
         # with a 236-share ladder bid, leaving a 136-share long against that
         # same fair.
-        protected = view.protected(SETTLEMENT_HOLD_EDGE, SETTLEMENT_HOLD_BUDGET)
+        #
+        # But skipping the whole MARKET was far too blunt, and it created a
+        # trap: we trade a market, accumulate a position there, that position
+        # earns settlement edge, the market becomes protected, and we stop
+        # quoting in it. The markets we are best at are exactly the ones we get
+        # evicted from. Measured: 17 of our top-80 markets were blocked,
+        # including the single busiest, which is 21% of the quoting universe
+        # and coincided with fills falling from 22/hour to 6.8/hour while
+        # venue-wide volume was unchanged at 3,000-5,500 trades/hour.
+        #
+        # The ladder only ever BUYS, so it reduces a protected SHORT but merely
+        # adds to a protected LONG. Only the former needs blocking; the
+        # per-market cap bounds the latter.
+        protected = {ex for ex in view.protected(SETTLEMENT_HOLD_EDGE,
+                                                 SETTLEMENT_HOLD_BUDGET)
+                     if view.positions.get(ex, 0.0) < 0}
         eligible = 0
         for ex, q in view.by_activity():
             if eligible >= c.max_markets:

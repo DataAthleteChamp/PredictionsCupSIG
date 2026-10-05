@@ -499,3 +499,23 @@ def test_exit_is_never_truncated_by_sticky_ladder_orders():
     exit_order = d(exchange_id="999", strategy="exit")
     kept = _truncate_by_priority(ladders + [exit_order], live, managed, 240)
     assert any(o.strategy == "exit" for o in kept), "exit evicted by sticky ladders"
+
+
+def test_ladder_still_blocked_from_closing_a_protected_short():
+    """A ladder buy reduces a short, so it must stay blocked."""
+    v = _held_short_view()
+    assert LadderStrategy().desired(v) == []
+
+
+def test_ladder_may_quote_in_a_market_holding_a_protected_LONG():
+    """
+    Skipping the whole market was too blunt: it evicted us from 17 of our
+    top-80 markets, including the busiest, because positions accumulate where
+    we trade most. A ladder BUY only adds to a long, so it is safe.
+    """
+    from sigbot.strategies.base import Lot, MarketView
+    lot = Lot("1", +500, avg_cost=0.80, age_minutes=600)
+    v = MarketView(quotes={"1": q(bid=0.80, ask=0.81)}, fair={"1": 0.95},
+                   positions={"1": 500}, equity=100_000.0, lots={"1": lot})
+    assert "1" in v.protected(0.02, 0.10), "precondition: protected long"
+    assert LadderStrategy().desired(v), "must still quote where it only adds"

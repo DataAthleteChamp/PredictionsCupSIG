@@ -820,3 +820,63 @@ def test_deployment_cap_matches_the_configuration_it_must_fund():
     book = orders * collat_each / 100_000
     assert book + peak_inventory <= 0.25 + 1e-9, "cap cannot fund its own book"
     assert book + peak_inventory > 0.20, "20% was genuinely too small"
+
+
+# ---------------------------- orders the mid has crossed must be cancelled ---
+
+def test_hysteresis_does_not_protect_an_order_the_mid_crossed():
+    """
+    A buy resting at 0.48 is passive against a 0.50 mid and AGGRESSIVE against
+    a 0.47 one. Hysteresis exists to leave near-matching orders alone, so it
+    was preserving exactly the orders that had turned toxic: 14.7% of fills,
+    earning -0.00276/share against +0.00368 passive.
+    """
+    live = [LiveOrder.from_api({"id": 7, "exchangeId": "1", "side": "yes",
+                                "action": "buy", "quantity": 100,
+                                "priceLimit": 0.48})]
+    want = [d(exchange_id="1", action="buy", price=0.48, quantity=100)]
+    kept = plan_orders(want, live, rm(), state())
+    assert [o.order_id for o in kept.keeps] == [7], "precondition: normally kept"
+    forced = plan_orders(want, live, rm(), state(), force_cancel_ids={7})
+    assert forced.keeps == []
+    assert [o.order_id for o in forced.cancels] == [7]
+
+
+def test_crossed_orders_detects_only_aggressive_resting_orders():
+    from sigbot.runner import crossed_orders
+    from sigbot.strategies.base import Quote
+    quotes = {"1": Quote("1", 0.46, 0.48)}        # mid 0.47
+    live = [
+        LiveOrder.from_api({"id": 1, "exchangeId": "1", "side": "yes",
+                            "action": "buy", "quantity": 10, "priceLimit": 0.48}),
+        LiveOrder.from_api({"id": 2, "exchangeId": "1", "side": "yes",
+                            "action": "buy", "quantity": 10, "priceLimit": 0.44}),
+        LiveOrder.from_api({"id": 3, "exchangeId": "1", "side": "yes",
+                            "action": "sell", "quantity": 10, "priceLimit": 0.46}),
+    ]
+    got = crossed_orders(live, quotes)
+    assert 1 in got, "buy above mid is aggressive"
+    assert 2 not in got, "buy below mid is still passive"
+    assert 3 in got, "sell below mid is aggressive"
+
+
+def test_crossed_orders_handles_a_no_side_order_in_the_right_frame():
+    """no/buy at 0.77 is economically a YES sell at 0.23."""
+    from sigbot.runner import crossed_orders
+    from sigbot.strategies.base import Quote
+    quotes = {"1": Quote("1", 0.20, 0.22)}        # mid 0.21
+    live = [LiveOrder.from_api({"id": 9, "exchangeId": "1", "side": "no",
+                                "action": "buy", "quantity": 10,
+                                "priceLimit": 0.77})]
+    # YES sell at 0.23 against a 0.21 mid is still passive
+    assert crossed_orders(live, quotes) == set()
+
+
+def test_crossed_orders_ignores_markets_without_a_mid():
+    from sigbot.runner import crossed_orders
+    from sigbot.strategies.base import Quote
+    live = [LiveOrder.from_api({"id": 1, "exchangeId": "1", "side": "yes",
+                                "action": "buy", "quantity": 10,
+                                "priceLimit": 0.48})]
+    assert crossed_orders(live, {"1": Quote("1", None, 0.48)}) == set()
+    assert crossed_orders(live, {}) == set()

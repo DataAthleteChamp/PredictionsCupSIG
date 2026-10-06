@@ -81,11 +81,24 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
                 risk: RiskManager, state: PortfolioState,
                 managed_order_ids: set[int] | None = None,
                 price_tolerance_ticks: int = 1,
-                qty_tolerance: float = 0.15) -> Plan:
+                qty_tolerance: float = 0.15,
+                force_cancel_ids: set[int] | None = None) -> Plan:
     """
     Pure diff. No I/O, fully testable.
 
-    An existing order is KEPT when a desired order matches it closely enough.
+    An existing order is KEPT when a desired order matches it closely enough,
+    UNLESS it is in `force_cancel_ids`.
+
+    That override exists because hysteresis is dangerous in one specific case.
+    A resting buy is passive only relative to where the mid WAS; if the mid
+    then falls through it, the order is now aggressive and will be filled by
+    someone selling into us. Hysteresis, whose whole purpose is to leave orders
+    alone, protects exactly the orders that have become toxic.
+
+    Measured over 1,996 fills: 14.7% landed on orders the mid had crossed, and
+    they earned -0.00276/share against +0.00368 for passive fills -- a drag of
+    -106 on a book that made +623. The caller identifies them from the live
+    mid and forces the cancel.
 
     Matching uses HYSTERESIS rather than exact equality. The ladder recomputes
     its targets from a moving mid, so an exact match would cancel and replace
@@ -142,6 +155,9 @@ def plan_orders(desired: list[DesiredOrder], live: list[LiveOrder],
             and abs(lo.quantity - d.quantity) <= max(1.0, qty_tolerance * d.quantity)
         ]
         # Prefer the closest price, so repeated desires do not all match one order.
+        if force_cancel_ids:
+            candidates = [lo for lo in candidates
+                          if lo.order_id not in force_cancel_ids]
         best = min(candidates, key=lambda lo: abs(lo.price - d.price), default=None)
         if best is not None:
             matched_ids.add(best.order_id)

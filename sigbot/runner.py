@@ -24,6 +24,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from .algos import to_yes_frame
 from .api import ApiError, Client
 from .config import Settings
 from .executor import Executor, LiveOrder, plan_orders
@@ -249,6 +250,37 @@ def update_activity(state: dict, quotes_raw: dict) -> dict[str, float]:
 
 
 
+def crossed_orders(live, quotes) -> set[int]:
+    """
+    Resting orders the mid has moved through, which are now aggressive.
+
+    A buy resting at 0.48 is passive against a 0.50 mid and AGGRESSIVE against
+    a 0.47 one: anybody selling now hits us at a price the market has already
+    left behind. These are the fills that hurt. Measured over 1,996 fills they
+    were 14.7% of the total and earned -0.00276/share against +0.00368 for
+    passive fills, a -106 drag on a +623 book.
+
+    They survive because hysteresis deliberately leaves nearly-matching orders
+    alone, so the mechanism meant to protect queue priority is what preserves
+    them. Cancelling on the crossing condition specifically leaves long-lived
+    passive orders untouched -- and those are the ones worth protecting, since
+    quotes alive 15-60 minutes earn about 3x those filled near the reprice
+    boundary.
+    """
+    out: set[int] = set()
+    for lo in live:
+        q = quotes.get(str(lo.exchange_id))
+        if q is None or q.mid is None:
+            continue
+        yes_action, yes_price = to_yes_frame(lo.side, lo.action, lo.price)
+        if yes_action == "buy" and yes_price >= q.mid:
+            out.add(lo.order_id)
+        elif yes_action == "sell" and yes_price <= q.mid:
+            out.add(lo.order_id)
+    return out
+
+
+
 def cycle(client: Client, risk: RiskManager, state: dict, *,
           journal: OrderJournal | None = None,
           use_polymarket: bool = True, verbose: bool = True) -> dict:
@@ -347,7 +379,8 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     desired = _truncate_by_priority(desired, live, managed,
                                     s.max_orders_per_cycle)
 
-    plan = plan_orders(desired, live, risk, pstate, managed_order_ids=managed)
+    plan = plan_orders(desired, live, risk, pstate, managed_order_ids=managed,
+                       force_cancel_ids=crossed_orders(live, quotes) & managed)
     result = Executor(client, risk, journal=journal).apply(plan)
 
     if not result.get("dry_run") and not journal:

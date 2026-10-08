@@ -400,3 +400,29 @@ def test_ladder_still_refuses_the_cheap_tail():
     """
     from sigbot.strategies.ladder import LadderConfig
     assert LadderConfig().floor_price >= 0.15
+
+
+# ------------------------------------------------------ the trading close ---
+
+def test_hours_to_close_is_signed():
+    from datetime import datetime, timezone
+    from sigbot.runner import hours_to_close
+    assert hours_to_close(datetime(2026, 11, 4, 14, 0, tzinfo=timezone.utc)) \
+        == pytest.approx(3.0)
+    assert hours_to_close(datetime(2026, 11, 4, 18, 0, tzinfo=timezone.utc)) \
+        == pytest.approx(-1.0)
+    assert hours_to_close(datetime(2026, 10, 9, 17, 0, tzinfo=timezone.utc)) > 600
+
+
+def test_grind_window_closes_before_settlement_does():
+    """
+    The grind must stop opening with enough time to round-trip what it already
+    holds; the settlement book must not, because selling an overpriced tail an
+    hour before resolution is the best version of that trade.
+    """
+    from sigbot.config import GRIND_STOP_HOURS_BEFORE_CLOSE
+    assert GRIND_STOP_HOURS_BEFORE_CLOSE > 0
+    # Comfortably longer than the exit strategy's decay horizon, or inventory
+    # opened just before the cutoff still cannot be scratched out in time.
+    from sigbot.strategies.exit import ExitConfig
+    assert GRIND_STOP_HOURS_BEFORE_CLOSE * 60 > ExitConfig().decay_minutes * 3

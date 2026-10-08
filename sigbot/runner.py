@@ -26,8 +26,9 @@ from datetime import datetime, timezone
 
 from .algos import to_yes_frame
 from .api import ApiError, Client
-from .config import (MAX_DEGRADED_SKIPS, MIN_ANCHOR_COVERAGE, Settings,
-                     START_BALANCE)
+from .config import (GRIND_STOP_HOURS_BEFORE_CLOSE, MAX_DEGRADED_SKIPS,
+                     MIN_ANCHOR_COVERAGE, Settings, START_BALANCE,
+                     TRADING_CLOSE_UTC)
 from .executor import Executor, LiveOrder, plan_orders
 from .fair import Crosswalk, FairValueEngine, clob_midpoints, sig_key
 from .journal import OrderJournal, recover
@@ -290,6 +291,19 @@ def crossed_orders(live, quotes) -> set[int]:
 
 
 
+def hours_to_close(now: datetime | None = None) -> float:
+    """
+    Hours remaining until trading closes, negative once it has passed.
+
+    The contest locks all positions at TRADING_CLOSE_UTC and settles every
+    market at that same instant, so this is both the trading deadline and the
+    payoff date. It is the one piece of wall-clock the strategies need.
+    """
+    now = now or datetime.now(timezone.utc)
+    close = datetime.fromisoformat(TRADING_CLOSE_UTC)
+    return (close - now).total_seconds() / 3600.0
+
+
 def update_targets(state: dict, targeted: set[str],
                    now: datetime | None = None) -> dict[str, float]:
     """
@@ -453,8 +467,27 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     # Settlement runs second: it holds the majority of the budget and its edge
     # is 20-50x the grind's, so it must claim its collateral before the
     # per-cycle order cap truncates anything.
+    hours_left = hours_to_close()
+    # Past the close there is nothing to trade: positions are locked and the
+    # venue settles. Keep the loop alive so the process stays supervised and
+    # the state file keeps updating, but stop asking for orders.
+    #
+    # Inside the final window, run EXIT and SETTLEMENT only. Exit reduces
+    # exposure, and settlement's edge is largest closest to resolution. The
+    # grind is the one that breaks: it opens inventory it will never get to
+    # round-trip, turning a sub-tick scratch trade into an unhedged election
+    # bet. TRADING_CLOSE_UTC existed as a constant for the whole contest and
+    # was referenced by nothing, so none of this was enforced.
+    grind_open = hours_left > GRIND_STOP_HOURS_BEFORE_CLOSE
     for strat in (ExitStrategy(), settlement, PairStrategy(), LadderStrategy(),
                   RelValueStrategy(), SleeveStrategy()):
+        if hours_left <= 0 and not isinstance(strat, ExitStrategy):
+            counts[type(strat).__name__] = 0
+            continue
+        if not grind_open and not isinstance(
+                (strat), (ExitStrategy, SettlementStrategy)):
+            counts[type(strat).__name__] = 0
+            continue
         got = (strat.desired(view, races, party_exchange)
                if isinstance(strat, PairStrategy) else strat.desired(view))
         counts[type(strat).__name__] = len(got)
@@ -518,6 +551,9 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
                   f"risk_free={floor['n_risk_free']}/{floor['n_races']} "
                   f"cost={floor['cost']:,.2f}")
         print(f"  fair values: {len(fair)} | strategies: {counts}")
+        if hours_left <= GRIND_STOP_HOURS_BEFORE_CLOSE:
+            print(f"  [close] {hours_left:.1f}h to trading close; "
+                  f"grind_open={grind_open}")
         print(f"  plan: {plan.summary()} | applied: placed={result['placed']} "
               f"cancelled={result['cancelled']} dry={result['dry_run']}")
         if journal:

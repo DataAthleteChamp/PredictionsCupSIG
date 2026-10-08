@@ -225,3 +225,16 @@ MIN_ANCHOR_COVERAGE = 0.90
 # is about 15 minutes: long enough to ride out a transient, short enough that
 # stale quotes cannot be adversely selected for long.
 MAX_DEGRADED_SKIPS = 3
+
+# Hours before TRADING_CLOSE_UTC at which the GRIND strategies stop opening.
+#
+# The grind (ladder, relvalue, pair, sleeve) earns a sub-tick edge by round
+# -tripping inventory over minutes. A position it opens shortly before the
+# close cannot be round-tripped: it stops being a scratch trade and becomes an
+# unhedged bet on the election, at a price chosen by a strategy that was never
+# asked that question.
+#
+# The settlement book is deliberately exempt. Selling an overpriced tail an
+# hour before resolution is the BEST version of that trade, not the worst --
+# there is no time left for the venue to move against the anchor.
+GRIND_STOP_HOURS_BEFORE_CLOSE = 6.0

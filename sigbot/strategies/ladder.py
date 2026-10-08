@@ -57,9 +57,40 @@ class LadderConfig:
     # range where fills actually happen.
     offsets: tuple[float, ...] = (0.015, 0.02, 0.03)
     # Only quote markets whose mid sits in this band.
+    #
+    # Upper bound cut from 0.85 to 0.50 on 2026-10-08. The binding resource is
+    # CAPITAL, not order slots -- we run at ~94% deployed -- so the metric that
+    # decides this is return on capital, not markout per share. Measured on our
+    # own 2,063 live fills at a 5-minute horizon:
+    #
+    #     price paid     n     markout/share   return on capital
+    #      <0.10         26      -0.00442          -4.36%
+    #      0.10-0.20    128      +0.00068          +0.51%
+    #      0.20-0.35    440      +0.00251          +0.88%
+    #      0.35-0.50    261      +0.00176          +0.41%
+    #      0.50-0.70    472      +0.00256          +0.41%
+    #      0.70-0.85    619      +0.00162          +0.21%
+    #      0.85-1.00    117      +0.00111          +0.13%
+    #
+    # Markout per share is nearly FLAT across the whole range -- which is why
+    # this went unnoticed for so long. Every tool we had, including
+    # research/backtest.py, scored configurations by markout per share, and
+    # that metric is blind to the fact that a +0.0016 edge costs 0.775 of
+    # capital at the top of the band and 0.265 in the middle of it.
+    #
+    # Weighted, 0.20-0.50 returns 0.70% against 0.30% for 0.50-0.85: 2.3x, on
+    # 701 and 1,091 fills respectively. The replay backtest agrees on
+    # direction, at 1.62x.
     min_mid: float = 0.20
-    max_mid: float = 0.85
+    max_mid: float = 0.50
     # Never bid inside this price, regardless of offset (tail markout negative).
+    #
+    # Re-confirmed 2026-10-08 and worth keeping despite a backtest that
+    # disagreed loudly. research/band_experiment.py scored the 0.00-0.05 band
+    # at +48% return on capital per fill; our own live fills below 0.10 return
+    # -4.36% on 26 fills with only 46% positive. The simulator has no queue
+    # position, so it assumes any print through our price reaches us -- least
+    # true exactly where books are thinnest. Live measurement wins.
     floor_price: float = 0.15
     # Sizing. Raised together with the 20% deployment cap.
     #

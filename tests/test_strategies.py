@@ -88,7 +88,10 @@ def test_ladder_prices_are_on_tick():
 def test_ladder_sizes_less_capital_at_lower_prices():
     deep = LadderStrategy(LadderConfig(offsets=(0.30,), min_mid=0.2, floor_price=0.15))
     shallow = LadderStrategy(LadderConfig(offsets=(0.02,), min_mid=0.2))
-    v = view({"1": q(bid=0.60, ask=0.62)})
+    # Mid inside the configured band. This used 0.61, which fell outside once
+    # the band was narrowed to 0.20-0.50 on capital-efficiency grounds, and the
+    # test then failed for a reason unrelated to the sizing it checks.
+    v = view({"1": q(bid=0.44, ask=0.46)})
     n_deep = deep.desired(v)[0]
     n_shallow = shallow.desired(v)[0]
     assert n_deep.price * n_deep.quantity < n_shallow.price * n_shallow.quantity
@@ -525,8 +528,10 @@ def test_ladder_may_quote_in_a_market_holding_a_protected_LONG():
     we trade most. A ladder BUY only adds to a long, so it is safe.
     """
     from sigbot.strategies.base import Lot, MarketView
-    lot = Lot("1", +500, avg_cost=0.80, age_minutes=600)
-    v = MarketView(quotes={"1": q(bid=0.80, ask=0.81)}, fair={"1": 0.95},
+    # Mid inside the ladder's band; the point is the protection rule, not the
+    # price level, and 0.805 fell outside once the band was narrowed to 0.50.
+    lot = Lot("1", +500, avg_cost=0.40, age_minutes=600)
+    v = MarketView(quotes={"1": q(bid=0.40, ask=0.41)}, fair={"1": 0.55},
                    positions={"1": 500}, equity=100_000.0, lots={"1": lot})
     assert "1" in v.protected(0.02, 0.10), "precondition: protected long"
     assert LadderStrategy().desired(v), "must still quote where it only adds"

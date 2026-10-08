@@ -371,3 +371,32 @@ def test_coverage_threshold_separates_jitter_from_failure():
     from sigbot.config import MIN_ANCHOR_COVERAGE
     assert 226 / 228 >= MIN_ANCHOR_COVERAGE, "99% coverage is healthy jitter"
     assert 117 / 228 < MIN_ANCHOR_COVERAGE, "51% coverage is a failed fetch"
+
+
+# ------------------------------------------- ladder price band (capital) ----
+
+def test_ladder_band_excludes_the_capital_inefficient_top():
+    """
+    The ladder's upper bound is a CAPITAL decision, not a markout one.
+
+    Measured on 2,063 live fills, markout per share is nearly flat from 0.20 to
+    1.00 (+0.00251 down to +0.00111) while return on capital falls 7x (+0.88%
+    to +0.13%), because the same edge costs three times as much cash at 0.775
+    as at 0.265. Every tool we had scored by markout per share and was
+    therefore blind to this.
+    """
+    from sigbot.strategies.ladder import LadderConfig
+    c = LadderConfig()
+    assert c.max_mid <= 0.50, "0.50-0.85 returns a third of 0.20-0.50 on capital"
+    assert c.min_mid >= 0.20
+
+
+def test_ladder_still_refuses_the_cheap_tail():
+    """
+    research/band_experiment.py scored the 0.00-0.05 band at +48% return on
+    capital per fill. Our own live fills below 0.10 returned -4.36%. The
+    simulator has no queue position and over-counts fills where books are
+    thinnest, so the floor stays.
+    """
+    from sigbot.strategies.ladder import LadderConfig
+    assert LadderConfig().floor_price >= 0.15

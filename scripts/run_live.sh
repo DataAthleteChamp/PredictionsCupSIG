@@ -59,4 +59,16 @@ if command -v caffeinate >/dev/null 2>&1; then
   CAFFEINATE="caffeinate -ims"
   echo "sleep inhibited via caffeinate"
 fi
-exec $CAFFEINATE python3 -u -m sigbot.runner "${ARGS[@]}" 2>&1 | tee -a "$LOG"
+echo "follow with: tail -f $LOG"
+# Write STRAIGHT to the log file rather than through a pipe.
+#
+# This was `| tee -a "$LOG"`. A detached bot inherits whatever stdout the
+# launching shell had, and if anything downstream closes that pipe -- a
+# `| head`, a disconnected terminal, a reader that exits -- the next print
+# raises BrokenPipeError and kills the process mid-cycle. That happened: the
+# bot died with 94% of capital deployed and nothing in the log explaining it,
+# because the explanation had nowhere to be written.
+#
+# A file cannot be closed by whoever is reading it, so the log is the only
+# safe destination for a process that must outlive its console.
+exec $CAFFEINATE python3 -u -m sigbot.runner "${ARGS[@]}" >> "$LOG" 2>&1

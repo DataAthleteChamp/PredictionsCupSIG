@@ -489,7 +489,12 @@ def test_short_residual_risk_is_small_when_the_price_is_already_high():
     s = state(positions={"1": -4000.0})
     desired = [d(exchange_id="1", action="sell", price=0.90, quantity=1000,
                  strategy="relvalue") for _ in range(12)]
-    p = plan_orders(desired, [], rm(), s)
+    # Give relvalue room explicitly, so the PER-MARKET cap is the only thing
+    # that can bind. Reading the live allocation turned this into a test of the
+    # strategy budget the moment that allocation was reweighted.
+    risk = rm(budgets=StrategyBudget(settlement=0.0, ladder=0.0, relvalue=0.50,
+                                     sleeve=0.0, reserve=0.50))
+    p = plan_orders(desired, [], risk, s)
     assert len(p.places) == 12, "correct framing leaves ample room at 0.90"
 
 

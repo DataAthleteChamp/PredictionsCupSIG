@@ -263,6 +263,28 @@ def test_settlement_has_a_budget_or_every_order_is_vetoed():
     assert risk.strategy_budget("settlement") > 0.0
 
 
+def test_already_deployed_capital_counts_against_the_budget():
+    """
+    A per-strategy budget that starts empty every cycle is not a budget: it can
+    be re-spent in full, forever. The settlement book reached 89.4% of equity
+    against a configured 74% allocation before this was caught, and only the
+    global deployment cap stopped it.
+
+    Seeded with the budget already consumed, the next order must be refused.
+    """
+    from sigbot.executor import DesiredOrder, plan_orders
+    s = settings()
+    budget = s.budgets.settlement * 100_000.0
+    spent = PortfolioState(
+        balance=10_000.0, equity=100_000.0, cost_basis=budget,
+        peak_equity=100_000.0, peak_adjusted_equity=100_000.0, positions={},
+        deployed_by_strategy={"settlement": budget})
+    p = plan_orders([DesiredOrder("1", "yes", "sell", 0.15, 100, "settlement")],
+                    [], RiskManager(s), spent)
+    assert not p.places, "budget already spent, yet another order was approved"
+    assert "settlement budget" in p.vetoed[0][1]
+
+
 def test_budgets_still_sum_to_one_with_settlement():
     StrategyBudget().validate()
 

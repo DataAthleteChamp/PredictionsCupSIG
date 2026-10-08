@@ -368,6 +368,26 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     pstate.settlement_unrealised = sum(
         float(p.get("unrealizedPnl") or 0.0) for p in positions
         if str(p["exchangeId"]) in holds)
+    # Seed the per-strategy budget from capital ALREADY deployed.
+    #
+    # Without this, `deployed_by_strategy` starts empty every cycle, so a
+    # per-strategy budget only ever constrained a single plan and reset to zero
+    # on the next one -- it could be re-spent in full, forever. The settlement
+    # book reached 89.4% of equity against a configured 74% budget before this
+    # was noticed, and only the global deployment cap stopped it. That is the
+    # same silent config/behaviour divergence as the deployment cap that once
+    # ran at 0.90 while every log line said 5%.
+    #
+    # `costBasis` is the collateral actually tied up, in the frame of the
+    # shares held: a short of 54 at an avgCost of 0.770 reports 41.58, which is
+    # the NO-side cash committed. Only the settlement book is attributed, since
+    # it is the one strategy whose positions are identifiable after the fact --
+    # `holds()` re-derives them from the anchor. Netted grind inventory cannot
+    # be attributed to the strategy that opened it, so those budgets keep their
+    # previous per-cycle-only behaviour rather than being guessed at.
+    pstate.deployed_by_strategy = {"settlement": sum(
+        float(p.get("costBasis") or 0.0) for p in positions
+        if str(p["exchangeId"]) in holds)}
     peak_adj = max(float(state.get("peak_adjusted_equity", START_BALANCE)),
                    pstate.adjusted_equity)
     state["peak_adjusted_equity"] = peak_adj

@@ -69,6 +69,13 @@ class MarketView:
     # picking the top 29 by this score captures 28.7% of flow against 10.3% for
     # id order and 33.9% for a perfect oracle.
     activity: dict[str, float] = field(default_factory=dict)
+    # exchange_id -> minutes since SettlementStrategy first wanted this market.
+    #
+    # Strategies are re-instantiated every cycle and hold no state, so "have we
+    # been waiting long enough to stop being passive?" cannot be answered from
+    # inside one. The runner persists the first-targeted timestamp and hands
+    # back the elapsed minutes.
+    targeted_minutes: dict[str, float] = field(default_factory=dict)
 
     def by_activity(self) -> list[tuple[str, Quote]]:
         """Quotes ordered busiest first, with a stable tie-break."""

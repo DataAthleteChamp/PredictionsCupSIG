@@ -1,0 +1,202 @@
+"""
+S6 -- the held-to-settlement convergence book.
+
+This strategy exists because of one line in the Official Rules:
+
+    "The three (3) participants with the highest total SUSQies balance
+     FOLLOWING THE RESOLUTION OF ALL MARKETS will receive cash prizes"
+
+The live leaderboard is marked to venue mid, and the venue mid is not the
+score. Every contract is credited or debited at resolution, so the only number
+that decides the competition is the balance after 2026-11-04T17:00Z. Measured
+on 2026-10-08, the top of the leaderboard carried 9.1M SUSQies of *paper*
+profit -- rank 1 booked 593k of it on the first day, and the whole top ten
+dropped ~15% within a single hour on 2026-10-06. That is correlated mark
+revaluation, not trading, and it reverses at settlement.
+
+WHY THIS IS NOT RelValueStrategy
+--------------------------------
+RelValue has the right thesis and the wrong selection rule. It walks markets in
+`by_activity()` order and stops at 60, because it was designed to earn a
+microstructure edge, which only exists where there is flow. The convergence
+edge lives in exactly the opposite place: the illiquid tails nobody trades.
+With `max_notional=120` spread over the 60 busiest markets, it had accumulated
+a total short-tail book of 111 shares. The edge was researched for days and
+never actually put on.
+
+This strategy ranks by EV per unit of collateral and ignores activity entirely.
+
+THE EDGE (measured 2026-10-08, 228 markets anchored to Polymarket)
+------------------------------------------------------------------
+SIG compresses probabilities toward 0.5 and never fully corrects:
+
+    Rhode Island Senate (R)     SIG 0.150   anchor 0.007    21x
+    South Dakota Senate (D)     SIG 0.095   anchor 0.002    48x
+    Delaware Senate (R)         SIG 0.130   anchor 0.017     8x
+
+122 of 228 markets price above their anchor. Selling the tail and holding to
+resolution is worth +11.2k on 101k of collateral, and it survives a 2022-sized
+polling miss (+10.2k under a 6pp national swing, +8.6k under 10pp) because the
+book shorts BOTH parties' tails -- a uniform swing cancels across the two legs.
+
+Depth is not the constraint: 37.5M shares sit on bids above our anchor across
+the top 40 markets, against capital that supports roughly 120k shares.
+
+SIZING
+------
+Rank by return on collateral, (price - fair) / (1 - price), not by raw edge.
+Raw edge prefers a 0.205 contract with a 0.110 gap over a 0.150 contract with a
+0.143 gap, but the second ties up less cash per share and pays more per unit of
+it. Collateral is the binding resource, so it belongs in the denominator.
+
+EXECUTION
+---------
+Hybrid, and deliberately so. Posting passively earns the spread but may never
+fill in a market that trades twice a day; crossing guarantees the fill but pays
+the spread. Against a 0.143 edge a one-tick spread is 3.5% of the edge, so
+certainty is worth far more than the saving -- but only after passive has been
+given a fair chance. So: rest at the offer, and once a market has been targeted
+for `cross_after_minutes` without filling, take the bid.
+
+The cross is still guarded. We only lift a bid that leaves `min_edge` intact,
+so a book that has gapped away from the anchor is skipped rather than chased.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..algos import round_to_tick
+from ..config import MAX_PRICE
+from ..executor import DesiredOrder
+from .base import MarketView
+
+
+@dataclass(frozen=True)
+class SettlementConfig:
+    # Minimum (price - fair) to open, in probability points. Four ticks, which
+    # is an order of magnitude above the ~0.4-tick microstructure grind edge.
+    min_edge: float = 0.02
+    # Only sell inside the tail band. Above this the contract is no longer a
+    # longshot and the compression edge we measured does not apply.
+    max_sell_price: float = 0.35
+    # Below this the premium collected cannot cover a single tick of slippage.
+    min_sell_price: float = 0.03
+    # How many distinct markets to hold. Diversification is the whole defence
+    # against a wrong anchor: 20 independent-ish races at 5% each cannot be
+    # undone by any single result.
+    max_markets: int = 24
+    # Collateral committed per market, as a fraction of equity.
+    per_market_fraction: float = 0.05
+    # Total collateral the book may commit, as a fraction of equity. The risk
+    # manager's own budget also applies; the lower of the two binds.
+    max_book_fraction: float = 0.78
+    # Rest passively for at least this long before crossing. One cycle is
+    # ~5.5 min, so this gives passive two clean attempts.
+    cross_after_minutes: float = 12.0
+    # Ignore dust shortfalls rather than churning one-share orders.
+    min_shares: int = 25
+    # Never send more than this in one market in one cycle; a single enormous
+    # order is both more visible and more likely to be partially filled at a
+    # worse average price than a sequence of smaller ones.
+    max_shares_per_order: int = 4_000
+
+
+class SettlementStrategy:
+    name = "settlement"
+
+    def __init__(self, cfg: SettlementConfig | None = None):
+        self.cfg = cfg or SettlementConfig()
+
+    # ------------------------------------------------------------- ranking --
+
+    def candidates(self, view: MarketView) -> list[tuple[str, float, float]]:
+        """
+        Markets worth shorting, best return-on-collateral first.
+
+        Returns (exchange_id, sell_price, return_on_collateral). The price is
+        the one we would actually rest at, so the edge is evaluated where the
+        trade would happen rather than at an unreachable mid.
+        """
+        c = self.cfg
+        out = []
+        for ex, q in view.quotes.items():
+            fair = view.fair.get(ex)
+            if fair is None or not q.tradeable or q.best_ask is None:
+                continue
+            px = round_to_tick(q.best_ask)
+            if not (c.min_sell_price <= px <= min(c.max_sell_price, MAX_PRICE)):
+                continue
+            if px - fair < c.min_edge:
+                continue
+            coll = 1.0 - px
+            if coll <= 0:
+                continue
+            out.append((ex, px, (px - fair) / coll))
+        out.sort(key=lambda r: (-r[2], str(r[0])))
+        return out
+
+    def holds(self, view: MarketView) -> set[str]:
+        """
+        Positions currently held for their settlement value.
+
+        Used by the risk manager to exempt these marks from the drawdown kill
+        switch, so membership is deliberately re-derived from the anchor every
+        cycle rather than remembered. A short whose anchor no longer supports
+        it loses the exemption immediately and is marked like anything else --
+        the exemption is conditional on the thesis, not on how we got in.
+        """
+        c = self.cfg
+        out = set()
+        for ex, qty in view.positions.items():
+            if qty >= 0:                       # only short tails qualify
+                continue
+            q = view.quotes.get(ex)
+            fair = view.fair.get(ex)
+            if q is None or q.mid is None or fair is None:
+                continue
+            if q.mid <= c.max_sell_price and q.mid - fair >= c.min_edge:
+                out.add(ex)
+        return out
+
+    # -------------------------------------------------------------- orders --
+
+    def desired(self, view: MarketView) -> list[DesiredOrder]:
+        c = self.cfg
+        out: list[DesiredOrder] = []
+        budget = c.max_book_fraction * view.equity
+        per_market = c.per_market_fraction * view.equity
+        committed = 0.0
+
+        for ex, px, _roc in self.candidates(view)[:c.max_markets]:
+            if committed >= budget:
+                break
+            q = view.quotes[ex]
+            fair = view.fair[ex]
+
+            # Hybrid: rest at the offer, then take the bid once passive has had
+            # its chance. The bid must still clear min_edge on its own -- we
+            # cross to buy certainty, never to chase a book that has moved.
+            price = px
+            waited = view.targeted_minutes.get(ex, 0.0)
+            if waited >= c.cross_after_minutes and q.best_bid is not None:
+                bid = round_to_tick(q.best_bid)
+                if bid - fair >= c.min_edge and bid >= c.min_sell_price:
+                    price = bid
+
+            coll_per_share = 1.0 - price
+            if coll_per_share <= 0:
+                continue
+
+            # Size to the SHORTFALL against the target, not to the target, or
+            # every cycle would re-request a position we already hold.
+            held_short = max(0.0, -view.positions.get(ex, 0.0))
+            target_shares = min(per_market, budget - committed) / coll_per_share
+            shortfall = int(target_shares - held_short)
+            if shortfall < c.min_shares:
+                committed += held_short * coll_per_share
+                continue
+
+            qty = min(shortfall, c.max_shares_per_order)
+            out.append(DesiredOrder(ex, "yes", "sell", price, qty, self.name))
+            committed += (held_short + qty) * coll_per_share
+        return out

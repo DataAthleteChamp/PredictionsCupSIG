@@ -43,16 +43,46 @@ class PortfolioState:
     positions: dict[str, float] = field(default_factory=dict)
     # strategy tag -> capital currently deployed
     deployed_by_strategy: dict[str, float] = field(default_factory=dict)
+    # Unrealised mark-to-market on positions held to resolution, and the peak
+    # of the equity series that excludes it. See `adjusted_equity`.
+    settlement_unrealised: float = 0.0
+    peak_adjusted_equity: float = START_BALANCE
 
     @property
     def deployed_fraction(self) -> float:
         return self.cost_basis / self.equity if self.equity > 0 else 1.0
 
     @property
+    def adjusted_equity(self) -> float:
+        """
+        Equity with the settlement book valued at COST rather than at mark.
+
+        The venue's tail marks are both inflated and violently unstable -- the
+        top ten of the leaderboard lost ~15% of their P&L within one hour on
+        2026-10-06 without trading. A book that is deliberately short those
+        tails therefore carries large unrealised swings that say nothing about
+        whether the trade is working, because the trade is settled against the
+        election result and not against the mid.
+
+        Marking those holds at cost removes that noise while leaving every
+        other source of loss -- realised losses, and the marks of everything we
+        are NOT holding to resolution -- fully visible to the kill switch.
+        """
+        return self.equity - self.settlement_unrealised
+
+    @property
     def drawdown(self) -> float:
         if self.peak_equity <= 0:
             return 0.0
         return max(0.0, (self.peak_equity - self.equity) / self.peak_equity)
+
+    @property
+    def adjusted_drawdown(self) -> float:
+        """Drawdown of the series the kill switch actually latches on."""
+        if self.peak_adjusted_equity <= 0:
+            return 0.0
+        return max(0.0, (self.peak_adjusted_equity - self.adjusted_equity)
+                   / self.peak_adjusted_equity)
 
 
 class RiskManager:
@@ -68,9 +98,23 @@ class RiskManager:
         return self._tripped
 
     def update(self, state: PortfolioState) -> None:
-        """Latch the kill switch if drawdown breaches the limit. Never un-latches."""
-        if self._tripped is None and state.drawdown >= self.limits.max_drawdown_fraction:
-            self._tripped = (f"drawdown {state.drawdown:.1%} >= "
+        """
+        Latch the kill switch if drawdown breaches the limit. Never un-latches.
+
+        Latches on `adjusted_drawdown`, which values held-to-resolution
+        positions at cost. The halt is a *stopping rule*, and a stopping rule
+        that fires on the mark of a position we have already decided to hold to
+        settlement would liquidate the trade precisely when the venue is most
+        dislocated -- which is when the trade is most valuable. That is the
+        limits-to-arbitrage failure: the constraint, not the thesis, ends the
+        position.
+
+        This does NOT disarm the switch. Realised losses, and marks on
+        everything not held to resolution, still count in full, and a position
+        drops out of the exemption the moment the anchor stops supporting it.
+        """
+        if self._tripped is None and state.adjusted_drawdown >= self.limits.max_drawdown_fraction:
+            self._tripped = (f"drawdown {state.adjusted_drawdown:.1%} >= "
                              f"{self.limits.max_drawdown_fraction:.1%}")
 
     def reset(self) -> None:
@@ -155,4 +199,4 @@ class RiskManager:
         # "exit" only ever reduces exposure, so it needs no opening budget; it
         # is allowed through because open_qty is zero, not because it has funds.
         return {"ladder": b.ladder, "relvalue": b.relvalue,
-                "sleeve": b.sleeve}.get(strategy, 0.0)
+                "sleeve": b.sleeve, "settlement": b.settlement}.get(strategy, 0.0)

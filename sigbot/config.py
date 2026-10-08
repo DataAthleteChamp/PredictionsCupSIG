@@ -70,19 +70,34 @@ class StrategyBudget:
 
     The core alone cannot reach a podium ~6x away; the sleeve alone would be
     paying the longshot premium with the whole stack.
+
+    Reweighted 2026-10-08 around the settlement book. The rules decide the
+    competition on balance AFTER resolution, the anchor disagrees with the
+    venue on 122 of 228 markets, and the measured capacity of that trade (37.5M
+    shares resting on bids above fair) exceeds our capital by ~300x. An edge
+    that large and that well evidenced should hold the majority of the book,
+    and the grind that earned +44/day should not.
+
+    `reserve` is no longer a risk buffer -- the settlement book's loss is
+    bounded by its own collateral and the venue cannot margin-call us -- but an
+    OPERATING buffer. At literally zero free cash the ladder cannot post a bid
+    and the pair strategy cannot lift a leg, so the bot stops functioning
+    before it stops being solvent.
     """
 
-    ladder: float = 0.30
-    relvalue: float = 0.20
-    sleeve: float = 0.10          # aspirational layer
-    reserve: float = 0.40         # never deployed
+    settlement: float = 0.74      # held-to-resolution convergence book
+    ladder: float = 0.12
+    relvalue: float = 0.04
+    sleeve: float = 0.04          # aspirational layer
+    reserve: float = 0.06         # operating buffer, never deployed
 
     @property
     def core(self) -> float:
-        return self.ladder + self.relvalue
+        return self.ladder + self.relvalue + self.settlement
 
     def validate(self) -> None:
-        total = self.ladder + self.relvalue + self.sleeve + self.reserve
+        total = (self.settlement + self.ladder + self.relvalue
+                 + self.sleeve + self.reserve)
         if abs(total - 1.0) > 1e-9:
             raise ValueError(f"budgets must sum to 1.0, got {total}")
         if self.sleeve > self.core:
@@ -158,7 +173,8 @@ class Settings:
         """
         return (f"caps: deployed<={self.limits.max_deployed_fraction:.1%} "
                 f"per_market<={self.limits.max_per_market_fraction:.1%} "
-                f"budgets(ladder={self.budgets.ladder:.0%},"
+                f"budgets(settlement={self.budgets.settlement:.0%},"
+                f"ladder={self.budgets.ladder:.0%},"
                 f"relvalue={self.budgets.relvalue:.0%},"
                 f"sleeve={self.budgets.sleeve:.0%},"
                 f"reserve={self.budgets.reserve:.0%}) "
@@ -179,4 +195,11 @@ class Settings:
 # trade into them. When only ExitStrategy knew, Ladder bought back a protected
 # short and opened the opposite exposure in the same cycle.
 SETTLEMENT_HOLD_EDGE = 0.02        # 4 ticks, well above the ~0.4-tick grind edge
-SETTLEMENT_HOLD_BUDGET = 0.10      # fraction of equity; matches the sleeve budget
+# Raised from 0.10 with the settlement book. This budget decides how much of
+# the portfolio ExitStrategy is forbidden to recycle and Ladder is forbidden to
+# trade into. While it was 0.10 the hold rule could only cover a tenth of
+# equity, which was ample for an accidental 111-share tail book and useless for
+# a deliberate one: everything above the budget would have been handed straight
+# back to the exit strategy for a sub-tick profit. It must cover the settlement
+# budget, or the two rules fight and the exit wins.
+SETTLEMENT_HOLD_BUDGET = 0.85      # fraction of equity; must exceed budgets.settlement

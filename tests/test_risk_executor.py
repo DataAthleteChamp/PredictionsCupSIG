@@ -440,14 +440,23 @@ def test_tail_sells_exhaust_the_strategy_budget_at_the_right_rate():
     the 5% per-market cap, but it consumes the relvalue budget 49x faster than
     the old price*quantity math did.
 
-    relvalue budget = 25% of 100,000 = 25,000.
-    Correct:  25,000 / 980 ~= 25 sells.   Buggy: 25,000 / 20 = 1,250 sells.
+    The expected count is DERIVED from the configured budget rather than
+    hardcoded. A previous version asserted "roughly 25", which encoded the
+    then-current 25% relvalue allocation into a test about collateral maths;
+    reallocating the budget then failed this test for a reason that had nothing
+    to do with what it checks. The invariant is the divisor -- budget/980, not
+    budget/20 -- so that is what is asserted.
     """
+    s = settings()
+    budget = s.budgets.relvalue * 100_000.0
+    expect = int(budget // 980.0)
+    assert expect >= 1, "relvalue budget too small for this test to say anything"
     desired = [d(exchange_id=str(i), action="sell", price=0.02, quantity=1000,
-                 strategy="relvalue") for i in range(60)]
+                 strategy="relvalue") for i in range(expect * 2 + 5)]
     p = plan_orders(desired, [], rm(), state())
-    assert len(p.places) <= 30, f"approved {len(p.places)}; collateral understated"
-    assert len(p.places) >= 20, "should still fit roughly 25"
+    assert len(p.places) == expect, (
+        f"approved {len(p.places)}, expected {expect}: a tail sell must be "
+        f"charged (1-p)*q collateral, not p*q")
     assert p.vetoed
 
 
@@ -582,8 +591,22 @@ def test_risk_banner_shows_the_numbers_that_actually_bind():
 def test_binding_cap_is_the_lower_of_limit_and_budgets():
     tight = settings(limits=RiskLimits(max_deployed_fraction=0.05))
     assert tight.max_deployable_fraction == 0.05        # limit binds
-    loose = settings(limits=RiskLimits(max_deployed_fraction=0.90))
-    assert abs(loose.max_deployable_fraction - 0.60) < 1e-9   # budgets bind
+
+    # Budgets bind when they total less than the limit. Constructed explicitly
+    # rather than read from the live allocation, so this keeps testing min()
+    # in BOTH directions however the book is reweighted.
+    narrow = settings(limits=RiskLimits(max_deployed_fraction=0.90),
+                      budgets=StrategyBudget(settlement=0.30, ladder=0.10,
+                                             relvalue=0.05, sleeve=0.05,
+                                             reserve=0.50))
+    assert abs(narrow.max_deployable_fraction - 0.50) < 1e-9
+
+    # The limit binds when the budgets total more than it.
+    wide = settings(limits=RiskLimits(max_deployed_fraction=0.60),
+                    budgets=StrategyBudget(settlement=0.74, ladder=0.12,
+                                           relvalue=0.04, sleeve=0.04,
+                                           reserve=0.06))
+    assert abs(wide.max_deployable_fraction - 0.60) < 1e-9
 
 
 def test_deployment_cap_actually_vetoes_at_the_limit():

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 from .algos import to_yes_frame
 from .api import ApiError, Client
-from .config import Settings
+from .config import Settings, START_BALANCE
 from .executor import Executor, LiveOrder, plan_orders
 from .fair import Crosswalk, FairValueEngine, clob_midpoints, sig_key
 from .journal import OrderJournal, recover
@@ -37,6 +37,7 @@ from .strategies.exit import ExitStrategy
 from .strategies.ladder import LadderStrategy
 from .strategies.pair import PairStrategy
 from .strategies.relvalue import RelValueStrategy
+from .strategies.settlement import SettlementStrategy
 from .strategies.sleeve import SleeveStrategy
 
 STATE_PATH = os.environ.get("SIGBOT_STATE", "research/data/bot_state.json")
@@ -183,9 +184,16 @@ def build_races(markets: list[dict], positions: list[dict]) -> tuple[dict, dict]
 # order-hour at its optimal depth against relvalue's unmeasured edge.
 #
 # Exit leads because it only reduces exposure and the edge it harvests is
-# perishable. Sleeve is last because it is the speculative layer.
-STRATEGY_PRIORITY = {"exit": 0, "pair": 1, "ladder": 2, "relvalue": 3,
-                     "sleeve": 4}
+# perishable. Settlement is next: it carries 74% of the budget and an edge
+# 20-50x the grind's, so it must claim collateral before the per-cycle cap
+# truncates anything. Sleeve is last because it is the speculative layer.
+#
+# A strategy MISSING from this map sorts last, below sleeve. When settlement
+# was first wired in it was absent, and 240 resting ladder orders truncated
+# all 24 of its orders out of the cycle -- the strategy ran, logged its
+# intentions, and placed nothing.
+STRATEGY_PRIORITY = {"exit": 0, "settlement": 1, "pair": 2, "ladder": 3,
+                     "relvalue": 4, "sleeve": 5}
 
 
 def _truncate_by_priority(desired, live, managed, cap):
@@ -281,6 +289,30 @@ def crossed_orders(live, quotes) -> set[int]:
 
 
 
+def update_targets(state: dict, targeted: set[str],
+                   now: datetime | None = None) -> dict[str, float]:
+    """
+    Track how long each market has been a settlement target, in minutes.
+
+    Strategies are re-instantiated every cycle and keep no state, so the
+    passive-then-cross rule needs the elapsed time handed to it. A market that
+    drops out of the target set forgets its clock, so re-entering starts
+    passive again rather than crossing immediately on a stale timestamp.
+    """
+    now = now or datetime.now(timezone.utc)
+    seen = state.get("settlement_targets") or {}
+    kept = {ex: seen[ex] for ex in targeted if ex in seen}
+    for ex in targeted:
+        kept.setdefault(ex, now.isoformat())
+    state["settlement_targets"] = kept
+    out: dict[str, float] = {}
+    for ex, ts in kept.items():
+        started = _parse_ts(ts)
+        out[ex] = 0.0 if started is None else max(
+            0.0, (now - started).total_seconds() / 60.0)
+    return out
+
+
 def cycle(client: Client, risk: RiskManager, state: dict, *,
           journal: OrderJournal | None = None,
           use_polymarket: bool = True, verbose: bool = True) -> dict:
@@ -306,7 +338,6 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
         cost_basis=float(summary.get("totalCostBasis", 0.0)), peak_equity=peak,
         positions={str(p["exchangeId"]): float(p["quantity"]) for p in positions},
     )
-    risk.update(pstate)
 
     # --- fair value -------------------------------------------------------
     fair: dict[str, float] = {}
@@ -325,9 +356,30 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
             if verbose:
                 print(f"  [warn] fair value unavailable: {e}")
 
+    # The settlement book is identified BEFORE the kill switch is evaluated,
+    # because the switch latches on equity that values these holds at cost.
+    # Without a fair value there is no thesis to exempt, so an outage of the
+    # external feed fails closed into ordinary mark-based risk.
+    settlement = SettlementStrategy()
+    base_view = MarketView(quotes=quotes, fair=fair, positions=pstate.positions,
+                           equity=equity, lots=build_lots(positions),
+                           activity=activity)
+    holds = settlement.holds(base_view) if fair else set()
+    pstate.settlement_unrealised = sum(
+        float(p.get("unrealizedPnl") or 0.0) for p in positions
+        if str(p["exchangeId"]) in holds)
+    peak_adj = max(float(state.get("peak_adjusted_equity", START_BALANCE)),
+                   pstate.adjusted_equity)
+    state["peak_adjusted_equity"] = peak_adj
+    pstate.peak_adjusted_equity = peak_adj
+    risk.update(pstate)
+
+    targeted = {ex for ex, _px, _roc in
+                settlement.candidates(base_view)[:settlement.cfg.max_markets]}
     view = MarketView(quotes=quotes, fair=fair, positions=pstate.positions,
                       equity=equity, lots=build_lots(positions),
-                      activity=activity)
+                      activity=activity,
+                      targeted_minutes=update_targets(state, targeted))
     races, party_exchange = build_races(markets, positions)
     floor = portfolio_floor(list(races.values())) if races else {}
 
@@ -336,7 +388,10 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     counts = {}
     # Exit runs first: the measured edge decays to negative by 240 min, so
     # harvesting existing inventory takes precedence over adding more.
-    for strat in (ExitStrategy(), PairStrategy(), LadderStrategy(),
+    # Settlement runs second: it holds the majority of the budget and its edge
+    # is 20-50x the grind's, so it must claim its collateral before the
+    # per-cycle order cap truncates anything.
+    for strat in (ExitStrategy(), settlement, PairStrategy(), LadderStrategy(),
                   RelValueStrategy(), SleeveStrategy()):
         got = (strat.desired(view, races, party_exchange)
                if isinstance(strat, PairStrategy) else strat.desired(view))
@@ -392,6 +447,10 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     if verbose:
         print(f"[{_now()}] equity={equity:,.2f} bal={pstate.balance:,.2f} "
               f"pos={len(positions)} dd={pstate.drawdown:.2%} kill={risk.tripped}")
+        print(f"  settlement: holds={len(holds)} targets={len(targeted)} "
+              f"unrealised={pstate.settlement_unrealised:+,.2f} "
+              f"adj_dd={pstate.adjusted_drawdown:.2%} "
+              f"deployed={pstate.deployed_fraction:.1%}")
         if floor:
             print(f"  floor={floor['guaranteed_floor']:+,.2f} "
                   f"risk_free={floor['n_risk_free']}/{floor['n_races']} "

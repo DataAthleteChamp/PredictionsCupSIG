@@ -203,3 +203,25 @@ SETTLEMENT_HOLD_EDGE = 0.02        # 4 ticks, well above the ~0.4-tick grind edg
 # back to the exit strategy for a sub-tick profit. It must cover the settlement
 # budget, or the two rules fight and the exit wins.
 SETTLEMENT_HOLD_BUDGET = 0.92      # fraction of equity; must exceed budgets.settlement
+
+# Anchor-feed health. Below this fraction of quoted markets carrying a fair
+# value, the fetch is treated as DEGRADED rather than as news.
+#
+# Measured 2026-10-08: 171 of 172 cycles returned 228 of 228 anchors, one
+# returned 117. That one cycle made six settlement shorts look like positions
+# whose edge had vanished -- ExitStrategy went from 2 orders to 12, the
+# kill-switch exemption dropped from 21 holds to 15, and the planner cancelled
+# 52 of 54 resting orders and replaced 50 of them on the next cycle.
+#
+# Coverage is bimodal (100% or broken), so the threshold only has to separate
+# those two modes; 0.90 sits well clear of normal jitter (226/228 = 99%) and
+# well above the observed failure (117/228 = 51%).
+MIN_ANCHOR_COVERAGE = 0.90
+
+# How many consecutive degraded cycles to sit out before planning anyway.
+#
+# Skipping is the right response to bad data, but skipping FOREVER leaves
+# resting orders unmanaged while the market moves away from them. Three cycles
+# is about 15 minutes: long enough to ride out a transient, short enough that
+# stale quotes cannot be adversely selected for long.
+MAX_DEGRADED_SKIPS = 3

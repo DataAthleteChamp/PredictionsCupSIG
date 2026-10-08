@@ -26,7 +26,8 @@ from datetime import datetime, timezone
 
 from .algos import to_yes_frame
 from .api import ApiError, Client
-from .config import Settings, START_BALANCE
+from .config import (MAX_DEGRADED_SKIPS, MIN_ANCHOR_COVERAGE, Settings,
+                     START_BALANCE)
 from .executor import Executor, LiveOrder, plan_orders
 from .fair import Crosswalk, FairValueEngine, clob_midpoints, sig_key
 from .journal import OrderJournal, recover
@@ -365,6 +366,31 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
                            equity=equity, lots=build_lots(positions),
                            activity=activity)
     holds = settlement.holds(base_view) if fair else set()
+    # Carry the exemption through a DEGRADED anchor fetch.
+    #
+    # `holds()` re-derives membership from the anchor every cycle, which is
+    # what makes the exemption conditional on the thesis rather than on how we
+    # got in. But a partial fetch is indistinguishable from the thesis lapsing:
+    # one cycle returned 117 of 228 anchors and six settlement shorts silently
+    # dropped out of the exempt set, so their marks would have counted toward a
+    # halt that exists to stop us bleeding, not to punish a flaky feed.
+    #
+    # So the re-derivation is trusted only when coverage is healthy. On a
+    # degraded cycle the last good set is reused, and positions we still hold
+    # keep the exemption they had. A position that is CLOSED still leaves the
+    # set, because the intersection with current positions is applied below.
+    coverage = base_view.anchor_coverage()
+    remembered = set(state.get("settlement_holds") or [])
+    degraded = bool(fair) and coverage < MIN_ANCHOR_COVERAGE
+    if degraded:
+        holds = remembered
+        skips = int(state.get("degraded_skips", 0)) + 1
+    else:
+        skips = 0
+        if fair:
+            state["settlement_holds"] = sorted(holds)
+    state["degraded_skips"] = skips
+    holds &= set(pstate.positions)
     pstate.settlement_unrealised = sum(
         float(p.get("unrealizedPnl") or 0.0) for p in positions
         if str(p["exchangeId"]) in holds)
@@ -393,6 +419,22 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     state["peak_adjusted_equity"] = peak_adj
     pstate.peak_adjusted_equity = peak_adj
     risk.update(pstate)
+
+    # A cycle that cannot see the anchor does nothing rather than acting on a
+    # partial view of it. Cancelling and replacing the whole book on a bad
+    # fetch costs queue position on every order and re-pays the spread, while
+    # our resting quotes are at most one cycle stale and sit 10-14 points
+    # inside a settlement edge -- five minutes of drift cannot erase that.
+    #
+    # Bounded, because sitting out forever leaves stale orders exposed to a
+    # market that keeps moving.
+    if degraded and skips <= MAX_DEGRADED_SKIPS:
+        print(f"[{_now()}] anchor coverage {coverage:.0%} < "
+              f"{MIN_ANCHOR_COVERAGE:.0%} -- skipping cycle "
+              f"{skips}/{MAX_DEGRADED_SKIPS}, {len(holds)} exemption(s) held")
+        save_state(state)
+        return {"equity": equity, "plan": None, "result": {"degraded": True},
+                "floor": {}}
 
     targeted = {ex for ex, _px, _roc in
                 settlement.candidates(base_view)[:settlement.cfg.max_markets]}

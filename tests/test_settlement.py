@@ -302,3 +302,69 @@ def test_hold_budget_covers_the_settlement_budget():
 def test_deployment_cap_allows_the_settlement_book():
     s = settings(limits=RiskLimits(max_deployed_fraction=0.95))
     assert s.max_deployable_fraction >= StrategyBudget().settlement
+
+
+# -------------------------------------------------- degraded anchor feed ----
+
+def lot(ex, qty, cost=0.85, age=120.0):
+    from sigbot.strategies.base import Lot
+    return Lot(exchange_id=ex, quantity=qty, avg_cost=cost, age_minutes=age)
+
+
+def test_missing_anchor_protects_a_held_position():
+    """
+    A missing anchor is absence of evidence, not evidence of no edge, and
+    settlement_edge() returns 0.0 for both. Measured 2026-10-08: one cycle
+    fetched 117 of 228 anchors and ExitStrategy immediately went from 2 orders
+    to 12, targeting settlement shorts whose fair value had merely vanished.
+    """
+    v = MarketView(quotes={"a": q("a"), "b": q("b")},
+                   fair={"a": 0.007},            # "b" has no anchor
+                   positions={"a": -1_000.0, "b": -1_000.0}, equity=100_000.0,
+                   lots={"a": lot("a", -1_000.0), "b": lot("b", -1_000.0)})
+    assert "b" in v.protected(0.02, 0.92), "unknown edge must mean do-not-touch"
+
+
+def test_unanchored_by_design_does_not_protect_everything():
+    """
+    With no anchor at all we are running --no-polymarket on purpose, and
+    protecting every position would freeze the exit strategy permanently.
+    """
+    v = MarketView(quotes={"a": q("a")}, fair={}, positions={"a": -1_000.0},
+                   equity=100_000.0, lots={"a": lot("a", -1_000.0)})
+    assert v.protected(0.02, 0.92) == set()
+
+
+def test_unknown_anchors_do_not_consume_the_hold_budget():
+    """
+    The budget bounds capital we deliberately commit to holds. Refusing to act
+    on absent data is not a commitment, and charging it would let an outage
+    evict genuinely high-edge positions.
+    """
+    v = MarketView(quotes={"known": q("known", 0.145, 0.155),
+                           "gap": q("gap", 0.145, 0.155)},
+                   fair={"known": 0.007},
+                   positions={"known": -1_000.0, "gap": -50_000.0},
+                   equity=100_000.0,
+                   lots={"known": lot("known", -1_000.0),
+                         "gap": lot("gap", -50_000.0)})
+    out = v.protected(0.02, 0.10)
+    assert out == {"known", "gap"}, "a huge unknown must not evict the known hold"
+
+
+def test_anchor_coverage_is_a_fraction_of_quoted_markets():
+    v = MarketView(quotes={str(i): q(str(i)) for i in range(10)},
+                   fair={"0": 0.01, "1": 0.02}, positions={}, equity=100_000.0)
+    assert v.anchor_coverage() == pytest.approx(0.2)
+    assert MarketView(quotes={}, fair={}, positions={},
+                      equity=1.0).anchor_coverage() == 0.0
+
+
+def test_coverage_threshold_separates_jitter_from_failure():
+    """
+    Coverage is bimodal: 171 of 172 cycles returned 228/228, one returned 117.
+    The threshold must pass normal jitter and catch the real failure.
+    """
+    from sigbot.config import MIN_ANCHOR_COVERAGE
+    assert 226 / 228 >= MIN_ANCHOR_COVERAGE, "99% coverage is healthy jitter"
+    assert 117 / 228 < MIN_ANCHOR_COVERAGE, "51% coverage is a failed fetch"

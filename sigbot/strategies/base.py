@@ -96,6 +96,10 @@ class MarketView:
             return 0.0
         return (q.mid - fair) if lot.quantity < 0 else (fair - q.mid)
 
+    def anchor_coverage(self) -> float:
+        """Fraction of quoted markets that have an external fair value."""
+        return len(self.fair) / len(self.quotes) if self.quotes else 0.0
+
     def protected(self, min_edge: float, budget_fraction: float) -> set[str]:
         """
         Markets whose position is being held for its settlement value.
@@ -111,11 +115,39 @@ class MarketView:
         The tie-break is explicit: equal edges previously inherited dict order,
         so a reordering of the venue's position response silently flipped which
         position was protected and churned orders.
+
+        A position whose anchor is MISSING is protected unconditionally. A
+        missing anchor is not evidence of no edge, but an absence of evidence,
+        and `settlement_edge` cannot tell the two apart -- it returns 0.0 for
+        both. Measured 2026-10-08: one cycle fetched 117 of 228 anchors, and
+        the six settlement shorts that lost their fair value immediately became
+        exit candidates (ExitStrategy went from 2 orders to 12) and lost their
+        kill-switch exemption (holds 21 -> 15). The anchor returned the next
+        cycle, but a longer partial outage would have unwound a book worth
+        ~+9,000 at settlement to capture sub-tick scratches.
+
+        The asymmetry decides the default: over-protecting pauses a grind worth
+        ~0.4 of a tick, under-protecting liquidates the settlement book. So
+        unknown means do-not-touch.
+
+        These unknowns do NOT consume the hold budget. That budget bounds how
+        much capital we deliberately commit to settlement holds; refusing to
+        act on absent data is not a capital commitment, and charging it would
+        let an outage evict genuinely high-edge holds.
         """
+        out = set()
+        # Only when the feed is live at all. With fair entirely empty we are
+        # running unanchored by design (--no-polymarket), and protecting every
+        # held position would freeze the exit strategy permanently.
+        if self.fair:
+            out |= {ex for ex in self.lots if ex not in self.fair}
+
         ranked = sorted(self.lots, key=lambda e: (-self.settlement_edge(e), str(e)))
         budget = budget_fraction * self.equity
-        held, out = 0.0, set()
+        held = 0.0
         for ex in ranked:
+            if ex in out:
+                continue
             if self.settlement_edge(ex) < min_edge:
                 break
             q = self.quotes.get(ex)

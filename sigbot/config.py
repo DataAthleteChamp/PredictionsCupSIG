@@ -85,11 +85,11 @@ class StrategyBudget:
     before it stops being solvent.
     """
 
-    settlement: float = 0.88      # held-to-resolution convergence book
-    ladder: float = 0.05
+    settlement: float = 0.91      # held-to-resolution convergence book
+    ladder: float = 0.04
     relvalue: float = 0.01
     sleeve: float = 0.01          # aspirational layer
-    reserve: float = 0.05         # operating buffer, never deployed
+    reserve: float = 0.03         # operating buffer, never deployed
 
     @property
     def core(self) -> float:
@@ -202,7 +202,7 @@ SETTLEMENT_HOLD_EDGE = 0.02        # 4 ticks, well above the ~0.4-tick grind edg
 # a deliberate one: everything above the budget would have been handed straight
 # back to the exit strategy for a sub-tick profit. It must cover the settlement
 # budget, or the two rules fight and the exit wins.
-SETTLEMENT_HOLD_BUDGET = 0.92      # fraction of equity; must exceed budgets.settlement
+SETTLEMENT_HOLD_BUDGET = 0.95      # fraction of equity; must exceed budgets.settlement
 
 # Anchor-feed health. Below this fraction of quoted markets carrying a fair
 # value, the fetch is treated as DEGRADED rather than as news.

@@ -273,7 +273,10 @@ def test_already_deployed_capital_counts_against_the_budget():
     Seeded with the budget already consumed, the next order must be refused.
     """
     from sigbot.executor import DesiredOrder, plan_orders
-    s = settings()
+    # Lift the GLOBAL cap so only the per-strategy budget can bind; otherwise
+    # the order is refused for the right reason by the wrong rule, and this
+    # stops testing what it claims to.
+    s = settings(limits=RiskLimits(max_deployed_fraction=1.0))
     budget = s.budgets.settlement * 100_000.0
     spent = PortfolioState(
         balance=10_000.0, equity=100_000.0, cost_basis=budget,

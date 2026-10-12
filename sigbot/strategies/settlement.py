@@ -66,7 +66,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..algos import round_to_tick
-from ..config import MAX_PRICE
+from ..config import MAX_PRICE, MIN_PRICE
 from ..executor import DesiredOrder
 from .base import MarketView
 
@@ -99,6 +99,21 @@ class SettlementConfig:
     # order is both more visible and more likely to be partially filled at a
     # worse average price than a sequence of smaller ones.
     max_shares_per_order: int = 4_000
+    # --- rotation gates ------------------------------------------------
+    # Rank of the candidate a holding is judged against. Comparing to the
+    # single best market would rotate everything into one name that cannot
+    # absorb it; this asks "is there a realistic home for this capital?".
+    rotate_rank: int = 8
+    # A holding must be worse than target/ratio before it is worth unwinding.
+    # Round-tripping costs roughly one tick each way, so a 10-20% edge
+    # improvement is consumed entirely by the spread.
+    rotate_ratio: float = 1.8
+    # ...and the gap must also be this many points of return on collateral in
+    # absolute terms, so near-zero edges cannot clear the ratio on noise.
+    rotate_min_gain: float = 0.02
+    # Markets rotated per cycle. An unwind that runs away costs far more than
+    # a slow rotation gains, and the book has 23 days to converge.
+    rotate_max_markets: int = 2
 
 
 class SettlementStrategy:
@@ -158,11 +173,78 @@ class SettlementStrategy:
                 out.add(ex)
         return out
 
+    # ------------------------------------------------------------ rotation --
+
+    def rotations(self, view: MarketView) -> list[DesiredOrder]:
+        """
+        Close holdings whose remaining edge is far worse than what is available.
+
+        The book is built once and then frozen: `desired` only ever ADDS, and
+        with the deployment cap binding there is never room to add anything
+        better. Measured 2026-10-13, 11 of 32 holdings (24,112 of collateral)
+        carried less remaining edge than the eighth-best market we did not own
+        -- ours at 2.6-5.4% return on collateral against 5.9-9.5% available.
+
+        Rotation is deliberately hard to trigger. Closing a short costs the
+        spread and re-opening costs it again, roughly 1 tick each way, so a
+        marginal improvement is worth nothing after costs. The gate is a
+        MULTIPLE plus an absolute floor, and only a bounded number of markets
+        move per cycle, because an unwind that runs away is far more expensive
+        than a slow rotation is valuable.
+
+        Closing orders are exempt from the opening-side risk caps, so these
+        cannot deadlock against the deployment cap the way a new short would.
+        """
+        c = self.cfg
+        cands = self.candidates(view)
+        if not cands:
+            return []
+        best = [r for _ex, _px, r in cands[:c.max_markets]]
+        if not best:
+            return []
+        # Compare against what we could realistically rotate INTO, not the
+        # single best market, which one position can never absorb.
+        target_roc = best[min(len(best) - 1, c.rotate_rank)]
+
+        ranked = []
+        for ex, qty in view.positions.items():
+            if qty >= 0:
+                continue
+            q = view.quotes.get(ex)
+            fair = view.fair.get(ex)
+            if q is None or fair is None or not q.tradeable or q.best_ask is None:
+                continue
+            mid = q.mid
+            if mid is None or mid >= 1.0:
+                continue
+            roc = (mid - fair) / (1.0 - mid)
+            ranked.append((roc, ex, q, -qty))
+        ranked.sort()
+
+        out = []
+        for roc, ex, q, shares in ranked[:c.rotate_max_markets]:
+            if roc >= target_roc / c.rotate_ratio:
+                break
+            if target_roc - roc < c.rotate_min_gain:
+                break
+            # Close by BUYING YES back. Join the offer rather than crossing:
+            # the position is not urgent, and paying up to exit a position we
+            # entered for its edge would hand back the gain twice over.
+            px = round_to_tick(q.best_ask)
+            if not (MIN_PRICE <= px <= MAX_PRICE):
+                continue
+            n = int(min(shares, c.max_shares_per_order))
+            if n < c.min_shares:
+                continue
+            out.append(DesiredOrder(ex, "yes", "buy", px, n, self.name))
+        return out
+
     # -------------------------------------------------------------- orders --
 
     def desired(self, view: MarketView) -> list[DesiredOrder]:
         c = self.cfg
-        out: list[DesiredOrder] = []
+        out: list[DesiredOrder] = list(self.rotations(view))
+        rotating = {o.exchange_id for o in out}
         budget = c.max_book_fraction * view.equity
         per_market = c.per_market_fraction * view.equity
         committed = 0.0
@@ -170,6 +252,8 @@ class SettlementStrategy:
         for ex, px, _roc in self.candidates(view)[:c.max_markets]:
             if committed >= budget:
                 break
+            if ex in rotating:          # never buy and sell the same market
+                continue
             q = view.quotes[ex]
             fair = view.fair[ex]
 

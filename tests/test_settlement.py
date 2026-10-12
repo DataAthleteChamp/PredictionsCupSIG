@@ -426,3 +426,76 @@ def test_grind_window_closes_before_settlement_does():
     # opened just before the cutoff still cannot be scratched out in time.
     from sigbot.strategies.exit import ExitConfig
     assert GRIND_STOP_HOURS_BEFORE_CLOSE * 60 > ExitConfig().decay_minutes * 3
+
+
+# ---------------------------------------------------------- rotation --------
+
+def _rot_view(held_roc_markets, candidate_mids):
+    """Build a view with held shorts and unheld candidates at given edges."""
+    quotes, fair, positions = {}, {}, {}
+    for ex, (mid, f) in held_roc_markets.items():
+        quotes[ex] = Quote(ex, mid - 0.005, mid + 0.005)
+        fair[ex] = f
+        positions[ex] = -2_000.0
+    for ex, (mid, f) in candidate_mids.items():
+        quotes[ex] = Quote(ex, mid - 0.005, mid + 0.005)
+        fair[ex] = f
+    return MarketView(quotes=quotes, fair=fair, positions=positions,
+                      equity=100_000.0)
+
+
+def test_rotation_closes_a_badly_outclassed_holding():
+    """
+    Measured 2026-10-13: 11 of 32 holdings carried 2.6-5.4% return on
+    collateral while unheld markets offered 5.9-9.5%. `desired` only ever adds,
+    and with the deployment cap binding there was never room to add anything
+    better, so the book stayed frozen in whatever it bought first.
+    """
+    s = SettlementStrategy()
+    v = _rot_view({"weak": (0.20, 0.185)},                 # ROC ~1.9%
+                  {f"c{i}": (0.10, 0.01) for i in range(12)})   # ROC ~10%
+    rot = s.rotations(v)
+    assert [o.exchange_id for o in rot] == ["weak"]
+    o = rot[0]
+    assert (o.side, o.action) == ("yes", "buy"), "closing a short BUYS yes back"
+    assert o.strategy == "settlement"
+
+
+def test_rotation_leaves_a_merely_slightly_worse_holding_alone():
+    """Round-tripping costs ~1 tick each way; a small gap is pure cost."""
+    s = SettlementStrategy()
+    v = _rot_view({"ok": (0.10, 0.028)},                   # ROC ~8%
+                  {f"c{i}": (0.10, 0.012) for i in range(12)})  # ROC ~9.8%
+    assert s.rotations(v) == []
+
+
+def test_rotation_is_bounded_per_cycle():
+    s = SettlementStrategy()
+    weak = {f"w{i}": (0.20, 0.19) for i in range(8)}
+    v = _rot_view(weak, {f"c{i}": (0.10, 0.005) for i in range(12)})
+    assert len(s.rotations(v)) <= SettlementConfig().rotate_max_markets
+
+
+def test_rotation_never_buys_and_sells_the_same_market():
+    """
+    A market that is both a rotation target and a top candidate would otherwise
+    get a closing BUY and an opening SELL in the same cycle, which crosses our
+    own book and pays the spread to stand still.
+    """
+    s = SettlementStrategy()
+    v = _rot_view({"x": (0.20, 0.19)},
+                  {f"c{i}": (0.10, 0.005) for i in range(12)})
+    orders = s.desired(v)
+    by_market = {}
+    for o in orders:
+        by_market.setdefault(o.exchange_id, set()).add(o.action)
+    for ex, actions in by_market.items():
+        assert actions != {"buy", "sell"}, f"{ex} quoted both ways"
+
+
+def test_rotation_ignores_longs():
+    s = SettlementStrategy()
+    v = _rot_view({}, {f"c{i}": (0.10, 0.005) for i in range(12)})
+    v = MarketView(quotes=v.quotes, fair=v.fair, positions={"c0": +5_000.0},
+                   equity=100_000.0)
+    assert all(o.action != "buy" for o in s.rotations(v))

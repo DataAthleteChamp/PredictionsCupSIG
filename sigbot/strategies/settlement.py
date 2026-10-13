@@ -86,7 +86,19 @@ class SettlementConfig:
     # undone by any single result.
     max_markets: int = 24
     # Collateral committed per market, as a fraction of equity.
-    per_market_fraction: float = 0.05
+    #
+    # Raised 0.05 -> 0.08 on 2026-10-13. By then the opportunity set was
+    # exhausted: of 49 unheld candidates only ONE beat our book average of
+    # 7.7% return on collateral (11.3%), with the second best at 7.4%. With
+    # nothing better to rotate INTO, the only way left to raise the book's
+    # return was to put more behind the positions already identified as best.
+    #
+    # Monte Carlo on the live book, moving 60% of the weakest seven positions
+    # into the strongest four: expected P&L +7,265 -> +8,001 with P(loss)
+    # 13.2% -> 12.9% and the 5th percentile -4,071 -> -4,933. Slightly fatter
+    # tail, materially better mean, and the concentration lands in markets the
+    # anchor prices at under 1%.
+    per_market_fraction: float = 0.08
     # Total collateral the book may commit, as a fraction of equity. The risk
     # manager's own budget also applies; the lower of the two binds.
     max_book_fraction: float = 0.78
@@ -103,7 +115,13 @@ class SettlementConfig:
     # Rank of the candidate a holding is judged against. Comparing to the
     # single best market would rotate everything into one name that cannot
     # absorb it; this asks "is there a realistic home for this capital?".
-    rotate_rank: int = 8
+    #
+    # Lowered 8 -> 3 on 2026-10-13. The candidate list decays far faster than
+    # assumed -- measured #1=11.3%, #2=7.4%, #3=7.0%, #8=5.5% -- so judging
+    # against the eighth-best compared our holdings to a target barely better
+    # than themselves and rotation correctly found nothing to do. Three is
+    # about what the per-market cap can actually absorb in one pass.
+    rotate_rank: int = 3
     # A holding must be worse than target/ratio before it is worth unwinding.
     # Round-tripping costs roughly one tick each way, so a 10-20% edge
     # improvement is consumed entirely by the spread.

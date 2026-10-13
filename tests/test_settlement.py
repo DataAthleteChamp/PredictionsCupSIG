@@ -499,3 +499,25 @@ def test_rotation_ignores_longs():
     v = MarketView(quotes=v.quotes, fair=v.fair, positions={"c0": +5_000.0},
                    equity=100_000.0)
     assert all(o.action != "buy" for o in s.rotations(v))
+
+
+def test_per_market_cap_leaves_room_for_the_risk_limit():
+    """
+    The strategy's own per-market size must sit UNDER the risk manager's cap,
+    or every top-up is vetoed and the book silently stops concentrating.
+    """
+    from sigbot.config import RiskLimits
+    import os
+    env = float(os.environ.get("SIG_MAX_PER_MARKET_FRACTION") or
+                RiskLimits().max_per_market_fraction)
+    assert SettlementConfig().per_market_fraction < env
+
+
+def test_rotate_rank_reflects_how_fast_candidates_decay():
+    """
+    Measured 2026-10-13: #1=11.3%, #2=7.4%, #3=7.0%, #8=5.5% return on
+    collateral. Judging a holding against the eighth-best compares it to a
+    target barely better than itself, and rotation then correctly finds
+    nothing to do.
+    """
+    assert SettlementConfig().rotate_rank <= 4

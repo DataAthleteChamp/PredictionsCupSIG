@@ -42,7 +42,13 @@ class RiskLimits:
     """Hard caps. The allocator enforces these; strategies cannot override them."""
 
     max_deployed_fraction: float = 0.90      # never commit the whole stack
-    max_per_market_fraction: float = 0.05
+    # Must stay above SettlementConfig.per_market_fraction, or the strategy's
+    # own sizing is vetoed by the risk manager on every top-up and the book
+    # silently stops concentrating. This default was 0.05 while the strategy
+    # asked for 0.08, so the code was correct only when .env happened to
+    # override it -- the same config/behaviour divergence as the deployment cap
+    # that once ran at 0.90 while every log line said 5%.
+    max_per_market_fraction: float = 0.09
     max_position_shares: int = 50_000
     max_drawdown_fraction: float = 0.20      # kill switch
     # Measured: both tail buckets markout negative. Do not buy inside these.

@@ -503,14 +503,15 @@ def test_rotation_ignores_longs():
 
 def test_per_market_cap_leaves_room_for_the_risk_limit():
     """
-    The strategy's own per-market size must sit UNDER the risk manager's cap,
-    or every top-up is vetoed and the book silently stops concentrating.
+    The strategy's own per-market size must sit UNDER the risk manager's
+    DEFAULT cap, not merely under whatever .env happens to set. Reading the
+    environment here made this test pass only when run with .env sourced, and
+    hid the fact that the shipped default (0.05) was below the size the
+    strategy asks for (0.08) -- so without the override every top-up was
+    vetoed and the book silently stopped concentrating.
     """
     from sigbot.config import RiskLimits
-    import os
-    env = float(os.environ.get("SIG_MAX_PER_MARKET_FRACTION") or
-                RiskLimits().max_per_market_fraction)
-    assert SettlementConfig().per_market_fraction < env
+    assert SettlementConfig().per_market_fraction < RiskLimits().max_per_market_fraction
 
 
 def test_rotate_rank_reflects_how_fast_candidates_decay():
@@ -521,3 +522,31 @@ def test_rotate_rank_reflects_how_fast_candidates_decay():
     nothing to do.
     """
     assert SettlementConfig().rotate_rank <= 4
+
+
+def test_hold_survives_a_position_drifting_above_the_opening_band():
+    """
+    `max_sell_price` is an OPENING rule -- where the measured favourite
+    -longshot bias lives. Whether to KEEP a position is a different question,
+    and answering it with the opening rule punishes exactly the positions that
+    have moved against us.
+
+    Measured 2026-10-14: four shorts drifted to 0.362-0.438 while still
+    carrying +0.023 to +0.073 of edge, and all four silently lost both the
+    kill-switch exemption and protection from ExitStrategy -- the trade was
+    going against us, so we made it eligible to be closed at a loss.
+    """
+    s = SettlementStrategy()
+    drifted = MarketView(quotes={"1": Quote("1", 0.430, 0.440)},
+                         fair={"1": 0.365}, positions={"1": -1_000.0},
+                         equity=100_000.0)
+    assert drifted.quotes["1"].mid > SettlementConfig().max_sell_price
+    assert s.holds(drifted) == {"1"}, "edge is +0.07; it must stay held"
+
+
+def test_opening_still_respects_the_tail_band():
+    """Keeping is not the same as opening: we still refuse to START there."""
+    s = SettlementStrategy()
+    v = MarketView(quotes={"1": Quote("1", 0.430, 0.440)}, fair={"1": 0.365},
+                   positions={}, equity=100_000.0)
+    assert s.candidates(v) == []

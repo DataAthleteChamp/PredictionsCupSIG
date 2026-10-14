@@ -177,6 +177,20 @@ class SettlementStrategy:
         cycle rather than remembered. A short whose anchor no longer supports
         it loses the exemption immediately and is marked like anything else --
         the exemption is conditional on the thesis, not on how we got in.
+
+        The test is the EDGE only. It deliberately does NOT apply
+        `max_sell_price`, which is an opening rule: it says where the measured
+        favourite-longshot bias lives and therefore where we are willing to
+        start a position. Whether to KEEP one is a different question, and
+        answering it with the opening rule punishes exactly the positions that
+        have moved against us. Measured 2026-10-14: four shorts drifted above
+        0.35 (to 0.362-0.438) while still carrying +0.023 to +0.073 of edge,
+        and all four silently lost both their kill-switch exemption and their
+        protection from ExitStrategy -- the trade was going against us, so we
+        made it eligible to be closed at a loss.
+
+        The edge test alone is the right guard. A position the anchor stops
+        supporting drops out on its own, wherever it is priced.
         """
         c = self.cfg
         out = set()
@@ -187,7 +201,7 @@ class SettlementStrategy:
             fair = view.fair.get(ex)
             if q is None or q.mid is None or fair is None:
                 continue
-            if q.mid <= c.max_sell_price and q.mid - fair >= c.min_edge:
+            if q.mid - fair >= c.min_edge:
                 out.add(ex)
         return out
 

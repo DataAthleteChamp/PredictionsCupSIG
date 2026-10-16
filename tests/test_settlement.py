@@ -550,3 +550,43 @@ def test_opening_still_respects_the_tail_band():
     v = MarketView(quotes={"1": Quote("1", 0.430, 0.440)}, fair={"1": 0.365},
                    positions={}, equity=100_000.0)
     assert s.candidates(v) == []
+
+
+# ---------------------------------------------- total anchor fetch failure --
+
+def test_total_fetch_failure_is_degraded_not_unanchored():
+    """
+    The bug, reproduced directly. `bool(fair)` was the old gate, and it cannot
+    tell a TOTAL fetch failure (attempted, got nothing) apart from a
+    deliberate --no-polymarket run (never attempted) -- both leave fair == {}.
+
+    Measured 2026-10-16T16:49: one cycle returned 0 of 228 anchors. Under the
+    old gate this was judged NOT degraded, so the skip-cycle guard never fired
+    and ExitStrategy treated the whole settlement book as ordinary decaying
+    inventory, placing 39 buy-back orders including nine of 9,000+ shares.
+    2,150 of a 2,216-share short filled before the next cycle recovered.
+    """
+    from sigbot.runner import is_degraded_fetch
+    assert is_degraded_fetch(True, 0.0) is True, \
+        "a fetch that was attempted and returned nothing must be degraded"
+
+
+def test_partial_fetch_failure_is_still_degraded():
+    from sigbot.runner import is_degraded_fetch
+    assert is_degraded_fetch(True, 117 / 228) is True
+
+
+def test_healthy_fetch_is_not_degraded():
+    from sigbot.runner import is_degraded_fetch
+    assert is_degraded_fetch(True, 1.0) is False
+    assert is_degraded_fetch(True, 226 / 228) is False
+
+
+def test_deliberately_unanchored_run_is_never_degraded():
+    """
+    --no-polymarket sets use_polymarket=False and fair stays {} for the whole
+    run by design. This must never trigger the skip-cycle guard, or the bot
+    would skip every single cycle forever.
+    """
+    from sigbot.runner import is_degraded_fetch
+    assert is_degraded_fetch(False, 0.0) is False

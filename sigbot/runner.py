@@ -304,6 +304,34 @@ def hours_to_close(now: datetime | None = None) -> float:
     return (close - now).total_seconds() / 3600.0
 
 
+def is_degraded_fetch(use_polymarket: bool, coverage: float) -> bool:
+    """
+    Whether this cycle's anchor fetch is too unreliable to act on.
+
+    Gates on whether we TRIED to fetch an anchor (`use_polymarket`), not on
+    whether anything came back (`bool(fair)`). Those differ exactly when a
+    fetch is attempted and returns completely empty, and that difference is
+    not academic: measured 2026-10-16T16:49, one cycle returned 0 of 228
+    anchors. Under a `bool(fair)`-gated check, `bool({})` is False, so the
+    cycle was judged NOT degraded, the skip-cycle guard never fired, and
+    `protected()` (which separately checks `if self.fair`) protected nothing.
+    ExitStrategy then saw the entire settlement book as ordinary decaying
+    inventory and placed 39 buy-back orders sized to match it -- nine of them
+    9,000+ shares, the signature of settlement positions rather than routine
+    grind inventory. 2,150 of a 2,216-share short filled before the next cycle
+    (7 minutes later) recovered and cancelled the rest, forfeiting about 114 of
+    a book worth five figures -- and was saved from being far worse only
+    because 13 more orders worth ~97,000 shares combined had not filled yet.
+
+    `use_polymarket` is known at call time and distinguishes the two cases
+    that `bool(fair)` could not: it is True whenever a fetch is attempted at
+    all, so both a total failure (0/228) and a partial one (117/228) are
+    correctly degraded, while a deliberate --no-polymarket run (fair
+    permanently {}) is correctly never degraded and never skips.
+    """
+    return use_polymarket and coverage < MIN_ANCHOR_COVERAGE
+
+
 def update_targets(state: dict, targeted: set[str],
                    now: datetime | None = None) -> dict[str, float]:
     """
@@ -395,7 +423,7 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     # set, because the intersection with current positions is applied below.
     coverage = base_view.anchor_coverage()
     remembered = set(state.get("settlement_holds") or [])
-    degraded = bool(fair) and coverage < MIN_ANCHOR_COVERAGE
+    degraded = is_degraded_fetch(use_polymarket, coverage)
     if degraded:
         holds = remembered
         skips = int(state.get("degraded_skips", 0)) + 1

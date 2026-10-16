@@ -535,3 +535,41 @@ def test_ladder_may_quote_in_a_market_holding_a_protected_LONG():
                    positions={"1": 500}, equity=100_000.0, lots={"1": lot})
     assert "1" in v.protected(0.02, 0.10), "precondition: protected long"
     assert LadderStrategy().desired(v), "must still quote where it only adds"
+
+
+def test_ladder_refuses_to_buy_where_the_anchor_disagrees():
+    """
+    Found 2026-10-16 auditing live positions: the ladder bought IA-01 (R) at
+    0.155 while the anchor priced it at 0.09, directly fighting our own
+    validated favourite-longshot edge. The ladder has no anchor awareness
+    otherwise -- it trades on local microstructure alone -- so nothing stopped
+    it. Isolated and small ($11.70 of edge fought), but cheap to close since
+    the anchor data is already fetched for every other strategy.
+    """
+    c = LadderConfig(min_mid=0.10, max_mid=0.50, floor_price=0.05)
+    v = view(quotes={"1": q(bid=0.150, ask=0.160)}, fair={"1": 0.09})
+    assert LadderStrategy(c).desired(v) == []
+
+
+def test_ladder_still_buys_where_the_anchor_is_silent_or_agrees():
+    """The guard must not block ordinary quoting when there is no conflict."""
+    c = LadderConfig(min_mid=0.10, max_mid=0.50, floor_price=0.05)
+    agree = view(quotes={"1": q(bid=0.150, ask=0.160)}, fair={"1": 0.14})
+    assert LadderStrategy(c).desired(agree)
+    silent = view(quotes={"1": q(bid=0.150, ask=0.160)}, fair={})
+    assert LadderStrategy(c).desired(silent)
+
+
+def test_ladder_anchor_guard_is_per_price_not_per_market():
+    """
+    A market can have rungs on both sides of the threshold; only the rungs the
+    anchor actually disagrees with should be dropped; a market vetoed outright
+    would be the same over-blocking mistake made (and fixed) for protection.
+    """
+    c = LadderConfig(offsets=(0.005, 0.08), min_mid=0.10, max_mid=0.50,
+                     floor_price=0.05)
+    v = view(quotes={"1": q(bid=0.150, ask=0.160)}, fair={"1": 0.09})
+    out = LadderStrategy(c).desired(v)
+    prices = {round(o.price, 3) for o in out}
+    assert 0.145 not in prices, "0.145 is 0.055 over anchor -- must be dropped"
+    assert 0.075 in prices, "0.075 is UNDER anchor -- must still be quoted"

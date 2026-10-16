@@ -92,6 +92,23 @@ class LadderConfig:
     # position, so it assumes any print through our price reaches us -- least
     # true exactly where books are thinnest. Live measurement wins.
     floor_price: float = 0.15
+    # Refuse a buy the external anchor says is already overpriced by this much.
+    #
+    # The ladder has no anchor awareness at all otherwise -- it buys on pure
+    # local microstructure (a dip in the recent mid), which is a DIFFERENT
+    # signal from the anchor comparison RelValue and Settlement already make
+    # with the same `view.fair` data. Usually these agree. On 2026-10-16 they
+    # did not: the ladder bought IA-01 (R) at 0.155 while the anchor priced it
+    # at 0.09, a position that directly fought our own validated
+    # favourite-longshot edge. It sat for 12+ hours as an unfillable exit
+    # order (resting above the market, waiting for a rise the anchor says is
+    # unlikely) before this was found.
+    #
+    # Isolated and small (one position, $11.70 of edge fought, -$1.80
+    # realised) -- not a material bleed on its own. The fix is cheap because
+    # the data is already fetched for every other strategy, so there is no
+    # reason to leave this gap open for the 19 remaining days.
+    max_anchor_overprice: float = 0.03
     # Sizing. Raised together with the 20% deployment cap.
     #
     # Extra capital can be spent two ways: more markets, or more size in the
@@ -171,12 +188,19 @@ class LadderStrategy:
             if abs(view.positions.get(ex, 0.0)) >= c.max_existing_shares:
                 continue
             eligible += 1
+            fair = view.fair.get(ex)
             for off in c.offsets:
                 px = round_to_tick(mid - off)
                 if px < max(c.floor_price, MIN_PRICE) or px > MAX_PRICE:
                     continue
                 # Must stay strictly passive: never cross, never improve the touch.
                 if q.best_bid is not None and px >= q.best_bid:
+                    continue
+                # Refuse to buy where the anchor itself says this price is
+                # already overpriced. Without this, the ladder's local
+                # microstructure signal can directly contradict the anchor
+                # comparison every other strategy makes with the same data.
+                if fair is not None and px - fair >= c.max_anchor_overprice:
                     continue
                 qty = min(equal_variance_size(px, c.size_scale,
                                               c.max_notional),

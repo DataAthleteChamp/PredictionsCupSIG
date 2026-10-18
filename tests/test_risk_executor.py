@@ -440,20 +440,25 @@ def test_tail_sells_exhaust_the_strategy_budget_at_the_right_rate():
     the 5% per-market cap, but it consumes the relvalue budget 49x faster than
     the old price*quantity math did.
 
-    The expected count is DERIVED from the configured budget rather than
-    hardcoded. A previous version asserted "roughly 25", which encoded the
-    then-current 25% relvalue allocation into a test about collateral maths;
-    reallocating the budget then failed this test for a reason that had nothing
-    to do with what it checks. The invariant is the divisor -- budget/980, not
-    budget/20 -- so that is what is asserted.
+    The relvalue budget is constructed EXPLICITLY rather than read from the
+    live default. A previous version hardcoded "roughly 25" (the then-current
+    25% allocation) and failed when the budget was reallocated for unrelated
+    reasons; a later version derived the expectation from the live default
+    instead, which fixed that but created the same coupling one step removed --
+    it broke again once relvalue's real-world allocation shrank to 0.5% (too
+    small for even one 980-collateral sell to fit at all). The invariant this
+    checks is the divisor -- budget/980, not budget/20 -- which has nothing to
+    do with what relvalue is actually funded at any given day, so the test now
+    picks its own budget to demonstrate it.
     """
-    s = settings()
-    budget = s.budgets.relvalue * 100_000.0
+    budgets = StrategyBudget(settlement=0.0, ladder=0.0, relvalue=0.25,
+                             sleeve=0.0, reserve=0.75)
+    budget = budgets.relvalue * 100_000.0
     expect = int(budget // 980.0)
     assert expect >= 1, "relvalue budget too small for this test to say anything"
     desired = [d(exchange_id=str(i), action="sell", price=0.02, quantity=1000,
                  strategy="relvalue") for i in range(expect * 2 + 5)]
-    p = plan_orders(desired, [], rm(), state())
+    p = plan_orders(desired, [], rm(budgets=budgets), state())
     assert len(p.places) == expect, (
         f"approved {len(p.places)}, expected {expect}: a tail sell must be "
         f"charged (1-p)*q collateral, not p*q")

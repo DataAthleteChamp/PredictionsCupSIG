@@ -89,12 +89,23 @@ class StrategyBudget:
     OPERATING buffer. At literally zero free cash the ladder cannot post a bid
     and the pair strategy cannot lift a leg, so the bot stops functioning
     before it stops being solvent.
+
+    Reweighted again 2026-10-18 in a push for top 100. Measured: $4,800 of
+    equity (4.6%) was sitting as pure idle cash while settlement sat AT its
+    own 91% ceiling -- the budget, not the opportunity set, was binding. 60
+    unheld candidates existed with the best at 10.8% return on collateral,
+    comparable to the top of the book already held. Ladder and relvalue were
+    both budgeted well above what they actually use (combined long collateral
+    measured at 2.9% of equity against a combined 5% budget), so shrinking
+    them costs almost nothing real and the freed room goes to the strategy
+    that is both proven and capital-constrained. `reserve` stays unchanged --
+    this is a reallocation of what was idle, not a cut to the operating buffer.
     """
 
-    settlement: float = 0.91      # held-to-resolution convergence book
-    ladder: float = 0.04
-    relvalue: float = 0.01
-    sleeve: float = 0.01          # aspirational layer
+    settlement: float = 0.94      # held-to-resolution convergence book
+    ladder: float = 0.02
+    relvalue: float = 0.005
+    sleeve: float = 0.005         # aspirational layer
     reserve: float = 0.03         # operating buffer, never deployed
 
     @property
@@ -208,7 +219,7 @@ SETTLEMENT_HOLD_EDGE = 0.02        # 4 ticks, well above the ~0.4-tick grind edg
 # a deliberate one: everything above the budget would have been handed straight
 # back to the exit strategy for a sub-tick profit. It must cover the settlement
 # budget, or the two rules fight and the exit wins.
-SETTLEMENT_HOLD_BUDGET = 0.95      # fraction of equity; must exceed budgets.settlement
+SETTLEMENT_HOLD_BUDGET = 0.97      # fraction of equity; must exceed budgets.settlement
 
 # Anchor-feed health. Below this fraction of quoted markets carrying a fair
 # value, the fetch is treated as DEGRADED rather than as news.

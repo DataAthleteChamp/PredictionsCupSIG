@@ -584,10 +584,18 @@ def test_env_override_is_read_for_the_deployment_cap(monkeypatch):
 
 
 def test_deployment_cap_falls_back_to_the_documented_default(monkeypatch):
+    """
+    Asserted against RiskLimits()'s own default, not a hardcoded number. The
+    two used to be separate literals in from_env() and the dataclass field,
+    and they had already drifted apart (0.90 here vs 0.99 there) before this
+    was caught; a test pinning either one by value is exactly how that
+    drift goes unnoticed a second time.
+    """
     monkeypatch.setenv("SIG_BASE_URL", "https://x")
     monkeypatch.setenv("SIG_RECON_KEY", "r")
     monkeypatch.delenv("SIG_MAX_DEPLOYED_FRACTION", raising=False)
-    assert Settings.from_env().limits.max_deployed_fraction == 0.90
+    assert (Settings.from_env().limits.max_deployed_fraction
+            == RiskLimits().max_deployed_fraction)
 
 
 def test_risk_banner_shows_the_numbers_that_actually_bind():

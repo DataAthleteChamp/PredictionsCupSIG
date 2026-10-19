@@ -41,7 +41,19 @@ def _f(name: str, default: float) -> float:
 class RiskLimits:
     """Hard caps. The allocator enforces these; strategies cannot override them."""
 
-    max_deployed_fraction: float = 0.90      # never commit the whole stack
+    max_deployed_fraction: float = 0.99      # never commit the whole stack
+    # Raised from 0.90 on 2026-10-19. That value had drifted below the
+    # strategy budget sum (settlement 0.94 + ladder 0.02 + relvalue 0.005 +
+    # sleeve 0.005 = 0.97), so a fresh run without SIG_MAX_DEPLOYED_FRACTION
+    # set would have capped settlement BELOW its own intended target -- the
+    # exact "cap exists only in an environment variable, and the code's own
+    # default silently contradicts it" failure this project has hit before.
+    # 0.99 carries genuine margin above the 0.97 budget sum rather than being
+    # exactly equal to it: a short's collateral grows as its price converges
+    # toward the anchor, so the budget sum is a floor on real usage, not a
+    # ceiling, and a cap with zero slack above it starves every other
+    # strategy the moment the book moves favourably. See StrategyBudget's
+    # docstring for the incident this caused.
     # Must stay above SettlementConfig.per_market_fraction, or the strategy's
     # own sizing is vetoed by the risk manager on every top-up and the book
     # silently stops concentrating. This default was 0.05 while the strategy
@@ -100,6 +112,21 @@ class StrategyBudget:
     them costs almost nothing real and the freed room goes to the strategy
     that is both proven and capital-constrained. `reserve` stays unchanged --
     this is a reallocation of what was idle, not a cut to the operating buffer.
+
+    THE SAME CHANGE NEARLY STARVED THE GRIND IT WAS SUPPOSED TO COEXIST WITH.
+    A short's collateral is (1-price)*quantity, so it GROWS as price falls
+    toward our anchor -- the exact convergence the book exists to capture. The
+    global deployment cap was set to settlement's budget plus the grind's
+    combined budget with NO margin for this (94+2+0.5+0.5=97=cap, exactly).
+    Within 24 hours settlement's cost basis crept to 96.67% of equity even as
+    its position COUNT fell (33 -> 29), because the remaining shorts had each
+    moved further into profit. That left under 0.5% of headroom under the
+    shared cap, and ladder/relvalue -- whose OWN budgets were nowhere near
+    used up -- had 133 of 142 orders vetoed by the GLOBAL cap in a single
+    cycle, not their own limits. Managed order count fell from 29 to 1 before
+    this was caught. The global cap (SIG_MAX_DEPLOYED_FRACTION, in .env) must
+    carry real slack above the strategy-budget sum, not just enough for the
+    budgets to add up on paper.
     """
 
     settlement: float = 0.94      # held-to-resolution convergence book
@@ -158,9 +185,22 @@ class Settings:
             raise RuntimeError("SIG_RECON_KEY is not set")
         # Deployment cap is env-overridable so a live validation run can be
         # hard-limited well below the normal ceiling.
+        #
+        # Defaults come from RiskLimits' OWN dataclass fields, not from a
+        # second hardcoded literal here. Both this method and the dataclass
+        # previously carried their own copy of each default, and they had
+        # already drifted apart in both directions: this method still said
+        # 0.90/0.05 after the dataclass fields were raised to 0.99/0.09 for
+        # unrelated reasons. A fresh run without the matching env var set
+        # would silently fall back to the STALE number, not the current one --
+        # the same "default exists in two places, only one gets updated"
+        # failure that has bitten this project before.
+        _defaults = RiskLimits()
         limits = RiskLimits(
-            max_deployed_fraction=_f("SIG_MAX_DEPLOYED_FRACTION", 0.90),
-            max_per_market_fraction=_f("SIG_MAX_PER_MARKET_FRACTION", 0.05),
+            max_deployed_fraction=_f("SIG_MAX_DEPLOYED_FRACTION",
+                                     _defaults.max_deployed_fraction),
+            max_per_market_fraction=_f("SIG_MAX_PER_MARKET_FRACTION",
+                                       _defaults.max_per_market_fraction),
         )
         s = cls(
             base_url=base,

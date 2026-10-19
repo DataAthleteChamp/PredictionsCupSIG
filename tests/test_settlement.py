@@ -307,6 +307,34 @@ def test_deployment_cap_allows_the_settlement_book():
     assert s.max_deployable_fraction >= StrategyBudget().settlement
 
 
+def test_global_cap_has_real_margin_above_the_budget_sum():
+    """
+    The global deployment cap is the ONLY check that spans strategies; the
+    per-strategy checks cannot protect ladder/relvalue from settlement any
+    more than settlement's own budget can.
+
+    Measured 2026-10-19: with the cap set exactly equal to the budget sum
+    (0.97 == 0.97), settlement's cost basis crept to 96.67% of equity within
+    24 hours -- a short's collateral GROWS as price converges toward the
+    anchor, so the budget sum is a floor on real usage, not a ceiling. That
+    left under 0.5% of headroom shared across every other strategy, and
+    ladder/relvalue had 133 of 142 orders vetoed by the GLOBAL cap in a single
+    cycle, not their own limits. Managed order count fell from 29 to 1 before
+    this was caught.
+
+    The margin asserted here (2 points) is the minimum that let the book
+    recover in practice; it is not a formal bound on how far settlement's
+    collateral can drift.
+    """
+    b = StrategyBudget()
+    budget_sum = b.settlement + b.ladder + b.relvalue + b.sleeve
+    default_cap = RiskLimits().max_deployed_fraction
+    assert default_cap - budget_sum >= 0.02, (
+        f"cap {default_cap} leaves only {default_cap - budget_sum:.3f} above "
+        f"the {budget_sum} budget sum -- settlement's organic growth alone "
+        f"measured 2.67 points in 24 hours")
+
+
 # -------------------------------------------------- degraded anchor feed ----
 
 def lot(ex, qty, cost=0.85, age=120.0):

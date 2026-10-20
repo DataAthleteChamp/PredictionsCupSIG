@@ -650,7 +650,7 @@ def test_no_buy_is_a_yes_sell_and_must_not_face_the_buy_guard():
     """
     risk = RiskManager(settings())
     v = risk.check(state(), exchange_id="1", side="no", action="buy",
-                   price=0.97, quantity=100, strategy="relvalue")
+                   price=0.97, quantity=100, strategy="ladder")
     assert v is None, f"blocked our own edge trade: {v}"
 
 def test_build_races_converts_short_cost_to_yes_frame():

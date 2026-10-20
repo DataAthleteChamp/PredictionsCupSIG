@@ -38,9 +38,10 @@ from .strategies.base import Lot, MarketView, Quote
 from .strategies.exit import ExitStrategy
 from .strategies.ladder import LadderStrategy
 from .strategies.pair import PairStrategy
-from .strategies.relvalue import RelValueStrategy
 from .strategies.settlement import SettlementStrategy
-from .strategies.sleeve import SleeveStrategy
+# RelValueStrategy and SleeveStrategy are intentionally not imported here --
+# see the comment above the strategy loop in cycle() for why they were
+# retired from the live loop on 2026-10-21.
 
 STATE_PATH = os.environ.get("SIGBOT_STATE", "research/data/bot_state.json")
 
@@ -495,6 +496,21 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     # Settlement runs second: it holds the majority of the budget and its edge
     # is 20-50x the grind's, so it must claim its collateral before the
     # per-cycle order cap truncates anything.
+    #
+    # RelValue and Sleeve were RETIRED from this loop on 2026-10-21, not
+    # rebudgeted to zero and left running. Measured over the prior 7 days:
+    # RelValue placed 4,387 orders for 255 fills (5.8%) and net -28.68 -- a
+    # weaker, uncapitalised shadow of what Settlement already does with 94% of
+    # the book and a 12%+ realised return. Sleeve's own docstring documents
+    # why it is correctly idle (it only buys a tail SIG prices BELOW the
+    # anchor, the opposite of the measured bias, so a hit is rare by
+    # construction) -- but idle is idle, and with 13 days left the capital
+    # reserved for a rare signal is worth more reallocated to the strategy
+    # already proven to use it. Their code stays (strategies/relvalue.py and
+    # strategies/sleeve.py carry real research, including the Cardozo &
+    # Rivero-Wildemauwe citation and the measured SIG/Polymarket bias curve by
+    # price band); only the live loop no longer calls them, and their budget
+    # share now funds settlement directly.
     hours_left = hours_to_close()
     # Past the close there is nothing to trade: positions are locked and the
     # venue settles. Keep the loop alive so the process stays supervised and
@@ -507,8 +523,7 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     # bet. TRADING_CLOSE_UTC existed as a constant for the whole contest and
     # was referenced by nothing, so none of this was enforced.
     grind_open = hours_left > GRIND_STOP_HOURS_BEFORE_CLOSE
-    for strat in (ExitStrategy(), settlement, PairStrategy(), LadderStrategy(),
-                  RelValueStrategy(), SleeveStrategy()):
+    for strat in (ExitStrategy(), settlement, PairStrategy(), LadderStrategy()):
         if hours_left <= 0 and not isinstance(strat, ExitStrategy):
             counts[type(strat).__name__] = 0
             continue

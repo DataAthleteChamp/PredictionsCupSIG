@@ -127,12 +127,29 @@ class StrategyBudget:
     this was caught. The global cap (SIG_MAX_DEPLOYED_FRACTION, in .env) must
     carry real slack above the strategy-budget sum, not just enough for the
     budgets to add up on paper.
+
+    Retired relvalue and sleeve from the live loop on 2026-10-21 (see
+    runner.py's cycle()) and zeroed their budgets here. Measured over the
+    preceding 7 days: relvalue placed 4,387 orders for 255 fills (5.8% fill
+    rate) and a net -28.68 on its 0.5% (~$523) allocation -- a slightly
+    negative, uncapitalised shadow of the same price-vs-anchor signal
+    settlement already runs at 188x the size and a 12%+ realised return.
+    Sleeve had placed zero orders in 19 days; its own docstring explains this
+    is by design (it only buys a tail SIG prices BELOW the anchor, the
+    opposite of the measured bias), but a correctly-idle strategy still ties
+    up budget and a code path for no realised benefit. Both files keep their
+    research (bias-curve measurements, citations) for the record; only the
+    allocation and the live call moved. The freed 1.0 point goes entirely to
+    settlement (94 -> 95), which was the one strategy still shown to have
+    unused capacity (60 unheld candidates at 10%+ ROC, cash near zero) --
+    ladder's own collateral usage was well under its existing budget, so
+    adding to it would likely have just sat idle too.
     """
 
-    settlement: float = 0.94      # held-to-resolution convergence book
+    settlement: float = 0.95      # held-to-resolution convergence book
     ladder: float = 0.02
-    relvalue: float = 0.005
-    sleeve: float = 0.005         # aspirational layer
+    relvalue: float = 0.0         # retired 2026-10-21, see docstring above
+    sleeve: float = 0.0           # retired 2026-10-21, see docstring above
     reserve: float = 0.03         # operating buffer, never deployed
 
     @property
@@ -285,7 +302,7 @@ MAX_DEGRADED_SKIPS = 3
 
 # Hours before TRADING_CLOSE_UTC at which the GRIND strategies stop opening.
 #
-# The grind (ladder, relvalue, pair, sleeve) earns a sub-tick edge by round
+# The grind (ladder, pair) earns a sub-tick edge by round
 # -tripping inventory over minutes. A position it opens shortly before the
 # close cannot be round-tripped: it stops being a scratch trade and becomes an
 # unhedged bet on the election, at a price chosen by a strategy that was never

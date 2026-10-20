@@ -335,6 +335,24 @@ def test_global_cap_has_real_margin_above_the_budget_sum():
         f"measured 2.67 points in 24 hours")
 
 
+def test_relvalue_and_sleeve_are_retired_from_the_live_budget():
+    """
+    Pins the 2026-10-21 simplification. Measured over the preceding 7 days,
+    relvalue placed 4,387 orders for 255 fills (5.8%) and net -28.68 on its
+    0.5% allocation -- a weaker, uncapitalised shadow of the same signal
+    settlement already runs at far larger scale and a 12%+ realised return.
+    Sleeve had placed zero orders in 19 days by design (see its own
+    docstring). Both strategy FILES and their unit tests stay (the research
+    is real), but neither is called from runner.py's live loop any more, and
+    neither should be budgeted: a budget with no caller is capital doing
+    nothing. If either field goes positive again, it must be because the
+    strategy was re-added to the loop, not a stray rebalance.
+    """
+    b = StrategyBudget()
+    assert b.relvalue == 0.0
+    assert b.sleeve == 0.0
+
+
 # -------------------------------------------------- degraded anchor feed ----
 
 def lot(ex, qty, cost=0.85, age=120.0):

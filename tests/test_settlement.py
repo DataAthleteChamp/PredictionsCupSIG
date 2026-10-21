@@ -142,6 +142,37 @@ def test_respects_the_book_budget_across_markets():
     assert committed <= 0.10 * 100_000.0 + 1.0
 
 
+def test_max_book_fraction_does_not_stop_the_sizing_loop_before_the_budget():
+    """
+    Measured 2026-10-21: max_book_fraction had gone stale at 0.78 while the
+    external settlement budget had been raised to 0.94. `desired()`'s own
+    `committed` tracker only sums collateral for markets inside THIS cycle's
+    candidate list, so on a book with more good candidates than the budget
+    can fund, it stopped proposing ANYTHING for candidates ranked below that
+    point -- not vetoed by the real budget, simply never reached.
+
+    30 equally-good candidates here (max_markets raised to match, so the
+    market-COUNT cap is not what's tested), each capped at
+    max_shares_per_order=4,000 shares. A 0.78 throttle runs out of its
+    internal budget partway down the ROC-sorted list; 0.93 (current default,
+    1 point under the 0.94 settlement budget) must reach strictly further
+    down the SAME list.
+    """
+    quotes = {str(i): q(str(i)) for i in range(30)}
+    fair = {str(i): 0.007 for i in range(30)}
+    v = view(quotes=quotes, fair=fair)
+
+    stale = SettlementStrategy(SettlementConfig(max_book_fraction=0.78, max_markets=30))
+    current = SettlementStrategy(SettlementConfig(max_book_fraction=0.93, max_markets=30))
+    stale_markets = {o.exchange_id for o in stale.desired(v)}
+    current_markets = {o.exchange_id for o in current.desired(v)}
+
+    assert len(current_markets) > len(stale_markets)
+    assert stale_markets < current_markets, (
+        "the fix must reach strictly further down the ranked list, not just "
+        "a different subset")
+
+
 def test_caps_shares_per_order():
     s = SettlementStrategy(SettlementConfig(max_shares_per_order=500))
     assert s.desired(view())[0].quantity == 500
@@ -570,6 +601,32 @@ def test_rotation_ignores_longs():
     v = MarketView(quotes=v.quotes, fair=v.fair, positions={"c0": +5_000.0},
                    equity=100_000.0)
     assert all(o.action != "buy" for o in s.rotations(v))
+
+
+def test_rotation_skips_dust_instead_of_consuming_an_examination_slot():
+    """
+    Measured 2026-10-21: two odd lots (23 and 10 shares, left over from prior
+    partial fills) ranked as the two WORST holdings by return on collateral.
+    With rotate_max_markets=2, those two dust lots occupied BOTH examination
+    slots every cycle -- a position actually worth rotating, ranked third,
+    was never looked at. Neither dust lot could ever rotate anyway (they are
+    below min_shares), so the slots were wasted on positions this method was
+    always going to skip.
+
+    Same holding and candidate numbers as
+    test_rotation_closes_a_badly_outclassed_holding, with two dust shorts
+    added that rank worse than "weak". Dust must not prevent "weak" from
+    being examined and rotated.
+    """
+    s = SettlementStrategy()
+    v = _rot_view({"dust1": (0.20, 0.199), "dust2": (0.20, 0.199),
+                   "weak": (0.20, 0.185)},
+                  {f"c{i}": (0.10, 0.01) for i in range(12)})
+    v = MarketView(quotes=v.quotes, fair=v.fair,
+                   positions={**v.positions, "dust1": -4.0, "dust2": -4.0},
+                   equity=100_000.0)
+    rot = s.rotations(v)
+    assert [o.exchange_id for o in rot] == ["weak"]
 
 
 def test_per_market_cap_leaves_room_for_the_risk_limit():

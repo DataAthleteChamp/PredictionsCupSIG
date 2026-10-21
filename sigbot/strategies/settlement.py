@@ -101,7 +101,24 @@ class SettlementConfig:
     per_market_fraction: float = 0.08
     # Total collateral the book may commit, as a fraction of equity. The risk
     # manager's own budget also applies; the lower of the two binds.
-    max_book_fraction: float = 0.78
+    #
+    # Raised 0.78 -> 0.93 on 2026-10-21 (1 point under the external
+    # settlement budget of 94%, the same margin per_market_fraction keeps
+    # under the risk manager's 9% per-market cap). 0.78 had gone stale: it was
+    # never updated as the external budget was raised over the project's
+    # life, and because `committed` in `desired()` only accumulates collateral
+    # for markets inside THIS cycle's top `max_markets` candidates, it
+    # silently stopped the sizing loop partway down a 24-wide, ROC-sorted
+    # list -- funding roughly the top 9-10 candidates to their per-market cap
+    # and leaving the rest (7.3-9.4% ROC, not bad candidates) at 1-27% of
+    # their fair share. Verified by simulating `desired()` read-only at 0.78
+    # vs 0.93 against the live book: Arkansas Governor (9.4% ROC) and Oklahoma
+    # Senate (9.0%) were absent from the proposal entirely at 0.78 and present
+    # at 0.93 -- not rejected by the real budget check, simply never reached.
+    # The external settlement budget (94%) is unchanged and still the
+    # authoritative ceiling; this only stops a stale internal number from
+    # hiding good candidates from it before it gets a say.
+    max_book_fraction: float = 0.93
     # Rest passively for at least this long before crossing. One cycle is
     # ~5.5 min, so this gives passive two clean attempts.
     cross_after_minutes: float = 12.0
@@ -242,6 +259,20 @@ class SettlementStrategy:
         for ex, qty in view.positions.items():
             if qty >= 0:
                 continue
+            shares = -qty
+            # Dust must be excluded HERE, before the rotate_max_markets slice
+            # below, not after it. Measured 2026-10-21: two odd lots left over
+            # from prior partial fills (23 and 10 shares, ~13 total) sat
+            # permanently at the bottom of the ROC ranking -- too small for
+            # EITHER this method's own min_shares check or ExitStrategy's
+            # identical floor to ever act on. With rotate_max_markets=2, those
+            # two dust lots occupied BOTH examination slots in every cycle,
+            # so a position actually worth rotating never got looked at as
+            # long as it ranked third-worst or lower. Filtering before the
+            # slice costs nothing when there is no dust and fixes the case
+            # when there is.
+            if shares < c.min_shares:
+                continue
             q = view.quotes.get(ex)
             fair = view.fair.get(ex)
             if q is None or fair is None or not q.tradeable or q.best_ask is None:
@@ -250,7 +281,7 @@ class SettlementStrategy:
             if mid is None or mid >= 1.0:
                 continue
             roc = (mid - fair) / (1.0 - mid)
-            ranked.append((roc, ex, q, -qty))
+            ranked.append((roc, ex, q, shares))
         ranked.sort()
 
         out = []
@@ -266,8 +297,6 @@ class SettlementStrategy:
             if not (MIN_PRICE <= px <= MAX_PRICE):
                 continue
             n = int(min(shares, c.max_shares_per_order))
-            if n < c.min_shares:
-                continue
             out.append(DesiredOrder(ex, "yes", "buy", px, n, self.name))
         return out
 

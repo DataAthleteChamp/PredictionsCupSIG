@@ -353,6 +353,31 @@ def test_relvalue_and_sleeve_are_retired_from_the_live_budget():
     assert b.sleeve == 0.0
 
 
+def test_settlement_budget_has_not_crept_past_its_proven_safe_ceiling():
+    """
+    Pins a same-day regression. Raising settlement from 94% to 95% (to
+    reabsorb relvalue+sleeve's freed point) kept the nominal budget-SUM vs
+    cap margin at 2 points either way -- the only invariant the OTHER margin
+    test checks -- yet caused a real recurrence of the 2026-10-19 starvation.
+
+    Measured: under 94%, deployed% never once exceeded 97.2% across 306
+    cycles / 30 hours, and no cycle crowded ladder below managed=10 (bar one
+    cold-start cycle). Under 95%, 79 of the next 218 cycles hit >=97.5%,
+    peaking at 97.9%, and ladder's managed order count collapsed to 4-5 for a
+    continuous 6.5-hour, 42-cycle window. The nominal sum-vs-cap margin was
+    identical in both configurations; settlement's OWN ceiling is what
+    actually bounds how far its organic growth pushes total deployed, because
+    that growth happens through top-ups the per-strategy check does not stop
+    until settlement's own number is reached.
+
+    94% is the highest value measured safe in practice. Raising it again
+    requires re-running this exact before/after deployed%-distribution and
+    managed-order-count check against live data, not just re-checking that
+    the sum still adds up.
+    """
+    assert StrategyBudget().settlement <= 0.94
+
+
 # -------------------------------------------------- degraded anchor feed ----
 
 def lot(ex, qty, cost=0.85, age=120.0):

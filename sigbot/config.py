@@ -144,13 +144,31 @@ class StrategyBudget:
     unused capacity (60 unheld candidates at 10%+ ROC, cash near zero) --
     ladder's own collateral usage was well under its existing budget, so
     adding to it would likely have just sat idle too.
+
+    THAT 95% SETTLEMENT FIGURE WAS WRONG, CAUGHT WITHIN A DAY. The nominal
+    budget SUM did not change (97% either way: 94+2+0.5+0.5 before, 95+2+0+0
+    after), but settlement's OWN ceiling moving from 94 to 95 let it reach a
+    deployed% regime that had never once occurred in the prior 306 cycles /
+    30 hours (max 97.2%, zero cycles >=97.5%). Under the 95% ceiling, 79 of
+    the next 218 cycles hit >=97.5%, peaking at 97.9%, and for 42 of those
+    cycles (a continuous 6.5-hour window) ladder's managed order count
+    collapsed to 4-5 -- the same global-cap crowd-out mechanism as the
+    2026-10-19 incident above, just short of complete. The nominal
+    budget-sum-vs-cap margin (2 points either way) was never the binding
+    constraint; settlement's OWN ceiling is, because that is what determines
+    how far its organic growth can push total deployed before anything else
+    gets a look in. The freed point goes to `reserve` instead (94 stays
+    unchanged): reserve is explicitly the buffer that lets ladder post a bid
+    and pair lift a leg when cash is tight, which is the exact resource that
+    was starved. settlement keeps the retired strategies' code and research;
+    it does not keep their budget.
     """
 
-    settlement: float = 0.95      # held-to-resolution convergence book
+    settlement: float = 0.94      # held-to-resolution convergence book
     ladder: float = 0.02
     relvalue: float = 0.0         # retired 2026-10-21, see docstring above
     sleeve: float = 0.0           # retired 2026-10-21, see docstring above
-    reserve: float = 0.03         # operating buffer, never deployed
+    reserve: float = 0.04         # operating buffer, never deployed
 
     @property
     def core(self) -> float:

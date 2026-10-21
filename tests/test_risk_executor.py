@@ -89,9 +89,17 @@ def test_per_market_cap_enforced():
 
 
 def test_total_deployment_cap_enforced():
-    s = state(cost_basis=89_000.0)
-    assert rm().check(s, exchange_id="1", action="buy", price=0.5,
-                      quantity=5000, strategy="ladder") is not None
+    """
+    Must isolate the GLOBAL cap specifically, not incidentally ride on
+    whatever a per-strategy budget happens to be. Using "settlement" (budget
+    94%, far larger than this order) and a notional that stays under the
+    per-market cap (9%) but pushes cost_basis past the 99% global ceiling
+    means only the total-deployment check can be what fires.
+    """
+    s = state(cost_basis=95_000.0)
+    veto = rm().check(s, exchange_id="1", action="buy", price=0.5,
+                      quantity=10_000, strategy="settlement")
+    assert veto is not None and "total deployment cap" in veto.reason
 
 
 def test_strategy_budget_enforced():

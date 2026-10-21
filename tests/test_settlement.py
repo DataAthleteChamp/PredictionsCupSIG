@@ -409,6 +409,30 @@ def test_settlement_budget_has_not_crept_past_its_proven_safe_ceiling():
     assert StrategyBudget().settlement <= 0.94
 
 
+def test_ladder_budget_funded_from_reserve_reproduces_a_proven_configuration():
+    """
+    Pins the 2026-10-21 ladder bump (2% -> 3%, funded from reserve 4% -> 3%,
+    settlement unchanged at 94%). Replaying the live planner read-only found
+    91% of all vetoes (89 of 98) were "ladder budget" specifically -- ladder's
+    per-cycle allowance is NOT carried across cycles (see runner.py's
+    cycle(): only settlement's budget is seeded from already-deployed
+    capital), so 2% was its entire allowance to both re-validate ~32-49
+    resting orders and open new ones, against roughly 3x that in measured
+    demand.
+
+    This must reproduce the EXACT settlement+ladder sum (97%) and cap margin
+    (2 points under the 99% global cap) that ran clean for 30 hours before
+    the 2026-10-19 and 2026-10-21 starvation incidents -- not a new, untested
+    combination. If this ever fails, whatever changed needs the same
+    deployed%-distribution and managed-order-count check the other two
+    incidents in this file required, not just a sum check.
+    """
+    b = StrategyBudget()
+    assert b.ladder == pytest.approx(0.03)
+    assert b.reserve == pytest.approx(0.03)
+    assert b.settlement + b.ladder == pytest.approx(0.97)
+
+
 # -------------------------------------------------- degraded anchor feed ----
 
 def lot(ex, qty, cost=0.85, age=120.0):

@@ -162,13 +162,37 @@ class StrategyBudget:
     and pair lift a leg when cash is tight, which is the exact resource that
     was starved. settlement keeps the retired strategies' code and research;
     it does not keep their budget.
+
+    Moved the same point from `reserve` to `ladder` a few hours later, same
+    day. Replaying the live planner read-only (same inputs the real cycle
+    sees) found 91% of ALL vetoes (89 of 98) were "ladder budget" -- not the
+    order-count cap, not the global cap, not a market-eligibility filter.
+    Ladder's per-cycle allowance is deliberately NOT carried across cycles
+    (see runner.py's cycle(): grind inventory cannot be attributed back to
+    the strategy that opened it, so only settlement's budget is seeded from
+    already-deployed capital), so this 2% is ladder's entire allowance to
+    both re-validate its existing ~32-49 resting orders AND open new ones,
+    every single cycle -- and it was asking for roughly 3x that ($6,303 of
+    desired notional against a $2,127 budget, at the equity measured). The
+    edge behind that demand is real and measured (ladder.py: +0.005/share,
+    P(edge>0)=0.96 at 1 min), and it is earned across up to 80 largely
+    independent markets, so more resting capital should not cannibalise
+    itself the way concentrating in one market would.
+
+    Funded from `reserve`, not `settlement`, and not by coincidence: 94%
+    settlement + 3% reserve is the EXACT combination proven clean for 30
+    hours before the 95% mistake above, so giving ladder the point that used
+    to sit in reserve returns the book to a configuration already validated,
+    rather than exploring new territory. The margin against the global cap is
+    unaffected (94+3=97, same sum and same 2-point margin under the 99% cap
+    as every previously-proven-safe configuration in this file).
     """
 
     settlement: float = 0.94      # held-to-resolution convergence book
-    ladder: float = 0.02
+    ladder: float = 0.03
     relvalue: float = 0.0         # retired 2026-10-21, see docstring above
     sleeve: float = 0.0           # retired 2026-10-21, see docstring above
-    reserve: float = 0.04         # operating buffer, never deployed
+    reserve: float = 0.03         # operating buffer, never deployed
 
     @property
     def core(self) -> float:

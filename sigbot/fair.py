@@ -74,6 +74,48 @@ def poly_key(question: str) -> tuple[str, str, str] | None:
     return None
 
 
+# Alaska Senate and California Governor carry NO anchor under the three
+# _PATTERNS above, and did so for the whole contest until this was found on
+# 2026-10-27. Not a missing-match bug: both states use a top-four/top-two,
+# candidate-centric primary system rather than a clean partisan ballot line,
+# so Polymarket frames them per CANDIDATE ("Will Dan Sullivan win...") instead
+# of per party, and no amount of regex tuning against the party-vs-party
+# patterns will ever match that.
+#
+# Fixed by mapping each SIG party-side straight to its one, clearly dominant
+# same-party candidate. Verified safe to trust before adding:
+#   Alaska Senate:  Sullivan(R) 0.255 + Peltola(D) 0.745 = 1.000 exactly --
+#     the race has in practice consolidated to these two, so treating it as a
+#     clean two-outcome race (which devig_by_race requires to touch it) is
+#     empirically justified, not assumed.
+#   CA Governor:    SIG R ask 0.075 vs Hilton(R) 0.036 -> edge 0.039, ROC
+#     4.2%, in-band and comparable to several already-held positions.
+# Deliberately left out:
+#   CA Governor D (exchange 850): Polymarket has no standalone "will Becerra
+#     win" market, only 8 margin-banded sub-markets (e.g. "by 0%-10%"); summing
+#     them is possible but not needed, since we only ever SELL the tail side
+#     here and 850 is the favourite. Left unmapped rather than guessed at.
+#   Alaska GOVERNOR: at least 9 named Republican-aligned candidates on
+#     Polymarket with a visibly fragmented field -- no single one is a fair
+#     stand-in for "the Republican Party," unlike the Senate race's clean
+#     two-candidate consolidation. This approximation only holds where the
+#     field actually has consolidated; forcing it where it has not would
+#     manufacture an edge the same way devig_by_race already refuses to
+#     invent probability for a known-incomplete outcome set.
+#
+# Token ids are Polymarket CLOB token ids, stable for the life of the market
+# (verified directly via the Gamma API on 2026-10-27, not inferred).
+_SPECIAL_CASE_TOKENS: dict[str, tuple[tuple[str, str, str], str]] = {
+    # exchange_id -> (sig_key, polymarket_clob_token_id)
+    "1067": (("SENATE", "ALASKA", "R"),
+             "2618138322856109565904469085316346602627882727483900432328802655317079880335"),
+    "1066": (("SENATE", "ALASKA", "D"),
+             "72139607190315861034411702195742538105117960260100800877125381826122747504258"),
+    "851": (("GOV", "CALIFORNIA", "R"),
+            "62036777373156170213565171932095236744807107909020350504410807304822923031451"),
+}
+
+
 def _fetch(url: str, timeout: float = 30.0):
     req = urllib.request.Request(url, headers={"User-Agent": "sigbot/0.1"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -142,7 +184,22 @@ def build_crosswalk(sig_markets: list[dict], max_pages: int = 12) -> Crosswalk:
             xw.key_by_exchange[str(exch)] = k
             if k in poly:
                 xw.token_by_exchange[str(exch)] = poly[k]
+    _apply_special_case_tokens(xw)
     return xw
+
+
+def _apply_special_case_tokens(xw: Crosswalk) -> None:
+    """
+    Apply the known structural exceptions (see _SPECIAL_CASE_TOKENS) on top of
+    the generic pattern match, not instead of it -- these are markets the
+    three _PATTERNS can never match by construction, not ones the match failed
+    on. Mutates `xw` in place; only touches an exchange the generic pass
+    already recognised as a real SIG market (`key_by_exchange`), and only sets
+    `token_by_exchange`, never overriding `key_by_exchange` itself.
+    """
+    for exch, (_k, token) in _SPECIAL_CASE_TOKENS.items():
+        if exch in xw.key_by_exchange:          # the SIG market must exist
+            xw.token_by_exchange[exch] = token
 
 
 def clob_midpoints(token_ids: list[str], chunk: int = 50,

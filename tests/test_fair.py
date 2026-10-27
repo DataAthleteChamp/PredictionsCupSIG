@@ -56,6 +56,56 @@ def test_poly_key_rejects_margin_markets():
     assert poly_key("Will the Democratic candidate win the 2026 TX-28 election by 5%-10%?") is None
 
 
+# -------------------------------------------- Alaska/California special case
+
+def test_special_case_tokens_keys_agree_with_sig_key():
+    """
+    Alaska Senate and California Governor have no standard Polymarket
+    party-vs-party market (top-four/top-two primaries are framed per
+    candidate there), so their anchor is wired in directly rather than found
+    by poly_key(). The hardcoded key in each entry must still match what
+    sig_key() produces for the real SIG title, or the crosswalk silently
+    mismatches a market to the wrong race.
+    """
+    from sigbot.fair import _SPECIAL_CASE_TOKENS
+    titles = {
+        "1067": "Will the Republican Party win the Alaska Senate?",
+        "1066": "Will the Democratic Party win the Alaska Senate?",
+        "851": "Will the Republican Party win the California Governor?",
+    }
+    for exch, (key, _token) in _SPECIAL_CASE_TOKENS.items():
+        assert sig_key(titles[exch]) == key, exch
+
+
+def test_apply_special_case_tokens_only_touches_known_exchanges():
+    from sigbot.fair import _apply_special_case_tokens, _SPECIAL_CASE_TOKENS
+    present = Crosswalk(key_by_exchange={"1067": ("SENATE", "ALASKA", "R")})
+    _apply_special_case_tokens(present)
+    assert present.token_by_exchange["1067"] == _SPECIAL_CASE_TOKENS["1067"][1]
+
+    # An exchange NOT already known as a real SIG market (e.g. the title
+    # match failed, or the market closed) must not get a fabricated token.
+    absent = Crosswalk()
+    _apply_special_case_tokens(absent)
+    assert absent.token_by_exchange == {}
+
+
+def test_special_case_tokens_do_not_override_a_real_pattern_match():
+    """
+    Defensive: if a future Polymarket rewording ever made one of these three
+    exchanges match a normal _PATTERNS rule too, the special case must not
+    silently clobber a good match with a stale hardcoded one in a way that
+    changes behaviour unexpectedly -- it should simply set the same token
+    either way, since both are keyed to the one dominant same-party candidate.
+    This pins that applying it twice is idempotent, not destructive.
+    """
+    from sigbot.fair import _apply_special_case_tokens, _SPECIAL_CASE_TOKENS
+    present = Crosswalk(key_by_exchange={"851": ("GOV", "CALIFORNIA", "R")},
+                        token_by_exchange={"851": "some-other-token"})
+    _apply_special_case_tokens(present)
+    assert present.token_by_exchange["851"] == _SPECIAL_CASE_TOKENS["851"][1]
+
+
 # ------------------------------------------------------------- crosswalk ----
 
 def xw():

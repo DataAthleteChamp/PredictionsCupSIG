@@ -60,19 +60,23 @@ def test_poly_key_rejects_margin_markets():
 
 def test_special_case_tokens_keys_agree_with_sig_key():
     """
-    Alaska Senate and California Governor have no standard Polymarket
-    party-vs-party market (top-four/top-two primaries are framed per
-    candidate there), so their anchor is wired in directly rather than found
-    by poly_key(). The hardcoded key in each entry must still match what
-    sig_key() produces for the real SIG title, or the crosswalk silently
-    mismatches a market to the wrong race.
+    Alaska Senate, California Governor, and the Independent side of Nebraska
+    Senate/Montana Senate/Rhode Island Governor have no standard Polymarket
+    party-vs-party market match, so their anchor is wired in directly rather
+    than found by poly_key(). The hardcoded key in each entry must still
+    match what sig_key() produces for the real SIG title, or the crosswalk
+    silently mismatches a market to the wrong race.
     """
     from sigbot.fair import _SPECIAL_CASE_TOKENS
     titles = {
         "1067": "Will the Republican Party win the Alaska Senate?",
         "1066": "Will the Democratic Party win the Alaska Senate?",
         "851": "Will the Republican Party win the California Governor?",
+        "969": "Will the Independent Party win the Nebraska Senate?",
+        "965": "Will the Independent Party win the Montana Senate?",
+        "880": "Will the Independent Party win the Rhode Island Governor?",
     }
+    assert set(titles) == set(_SPECIAL_CASE_TOKENS), "test titles out of sync with the map"
     for exch, (key, _token) in _SPECIAL_CASE_TOKENS.items():
         assert sig_key(titles[exch]) == key, exch
 
@@ -256,3 +260,24 @@ def test_complete_outcome_set_is_still_devigged():
     """A fully-mapped two-way race must still have its overround removed."""
     out = FairValueEngine(xw()).combine({}, {"tokA": 0.60, "tokB": 0.60})
     assert out["1"] + out["2"] == pytest.approx(1.0)
+
+
+def test_adding_the_independent_side_completes_a_three_way_devig():
+    """
+    Pins the 2026-10-27 crosswalk extension's actual effect, not just its
+    existence: Nebraska/Montana Senate and Rhode Island Governor's R and D
+    sides were already anchored, carried PARTIAL (R+D only, see
+    test_partial_outcome_set_is_not_normalised_to_one) because the
+    Independent side had no token. Once all three sides have a token, the
+    race must flip from pass-through to a full three-way devig -- the same
+    `combine()` call, with one more exchange mapped, must now remove the
+    overround across all three instead of leaving it in the R/D pair.
+    """
+    three_way = Crosswalk(
+        token_by_exchange={"r": "tr", "d": "td", "i": "ti"},
+        key_by_exchange={"r": ("SENATE", "NEBRASKA", "R"),
+                         "d": ("SENATE", "NEBRASKA", "D"),
+                         "i": ("SENATE", "NEBRASKA", "I")})
+    out = FairValueEngine(three_way).combine({}, {"tr": 0.70, "td": 0.05, "ti": 0.05})
+    assert out["r"] + out["d"] + out["i"] == pytest.approx(1.0)
+    assert out["r"] != pytest.approx(0.70)   # overround actually removed, not passed through

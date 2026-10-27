@@ -103,6 +103,25 @@ def poly_key(question: str) -> tuple[str, str, str] | None:
 #     manufacture an edge the same way devig_by_race already refuses to
 #     invent probability for a known-incomplete outcome set.
 #
+# Second gap found the same day, same root cause one level deeper: the
+# INDEPENDENT side of Nebraska Senate, Montana Senate and Rhode Island
+# Governor carried no anchor either, because none of the three _PATTERNS
+# handle Polymarket's "Will an independent win..." phrasing at all (they only
+# ever match Democratic/Republican framings) -- unlike Alaska/California,
+# this is a genuine pattern gap, not a structural one, but Polymarket DOES
+# publish a clean, standalone market for each ("Will an independent win the
+# Nebraska Senate race in 2026?" etc.), so the same hardcoded-token fix
+# applies. Verified before trusting each:
+#   Nebraska Senate I: SIG ask 0.315 vs anchor 0.28  -> edge 0.035, ROC 5.1%
+#   Montana Senate I:  SIG ask 0.120 vs anchor 0.086 -> edge 0.035, ROC 3.9%
+#   RI Governor I:     SIG ask 0.070 vs anchor 0.035 -> edge 0.035, ROC 3.8%
+# All three races' R and D sides were already anchored via the normal pattern
+# match (confirmed: RI Governor R is one of our largest existing holdings).
+# Completing the I side means devig_by_race now sees all 3 known outcomes for
+# each race instead of 2, so it switches from passing the pair through
+# untouched to properly normalising all three -- a strictly more accurate
+# fair value for the R/D sides too, not just a new tradeable I side.
+#
 # Token ids are Polymarket CLOB token ids, stable for the life of the market
 # (verified directly via the Gamma API on 2026-10-27, not inferred).
 _SPECIAL_CASE_TOKENS: dict[str, tuple[tuple[str, str, str], str]] = {
@@ -113,6 +132,12 @@ _SPECIAL_CASE_TOKENS: dict[str, tuple[tuple[str, str, str], str]] = {
              "72139607190315861034411702195742538105117960260100800877125381826122747504258"),
     "851": (("GOV", "CALIFORNIA", "R"),
             "62036777373156170213565171932095236744807107909020350504410807304822923031451"),
+    "969": (("SENATE", "NEBRASKA", "I"),
+            "47975366268282823322598946778919483335780002591367838795894307024076579116518"),
+    "965": (("SENATE", "MONTANA", "I"),
+            "29340710087203628054916881063653310634997647642374537159652441277893390730162"),
+    "880": (("GOV", "RHODE ISLAND", "I"),
+            "13165388174900569619328636459480727052834519645059869980549561071064022087971"),
 }
 
 

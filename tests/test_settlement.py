@@ -554,6 +554,47 @@ def test_grind_window_closes_before_settlement_does():
     assert GRIND_STOP_HOURS_BEFORE_CLOSE * 60 > ExitConfig().decay_minutes * 3
 
 
+def test_grind_stop_covers_election_night_not_just_the_final_hours():
+    """
+    Pins the 2026-10-31 timing fix, two days before the real Nov 3 election.
+    6 hours only covered the final stretch before the Nov 4 17:00 UTC
+    deadline; it did nothing about the ~18-20 hours before that, when real
+    results actually arrive and ladder's core assumption (a dip is noise that
+    reverts in minutes) is most likely to be false. The stop must land before
+    the EARLIEST polls close (~23:00 UTC Nov 3, parts of Indiana/Kentucky),
+    not just before the final lock.
+    """
+    from datetime import datetime, timezone
+    from sigbot.config import GRIND_STOP_HOURS_BEFORE_CLOSE
+    from sigbot.runner import hours_to_close
+    earliest_poll_close = datetime(2026, 11, 3, 23, 0, tzinfo=timezone.utc)
+    hours_left_at_first_poll_close = hours_to_close(earliest_poll_close)
+    assert GRIND_STOP_HOURS_BEFORE_CLOSE >= hours_left_at_first_poll_close, (
+        "the grind must already be stopped before any poll closes, or it can "
+        "still open new inventory on the first real results of the night")
+
+
+def test_pair_is_exempt_from_the_grind_stop_but_ladder_is_not():
+    """
+    Pins the 2026-10-31 fix: pair was previously stopped alongside ladder
+    purely because it shares ladder's budget tag, even though pair never
+    opens new, uncovered exposure -- every order it proposes completes an
+    existing leg into a guaranteed, resolution-paid floor (pair.py's own
+    docstring: "we are paid 1.0 whatever happens"). It belongs with exit and
+    settlement, which is what actually decides whether stopping near the
+    close is safe, not which budget a strategy happens to draw from.
+    """
+    from sigbot.runner import GRIND_STOP_EXEMPT
+    from sigbot.strategies.exit import ExitStrategy
+    from sigbot.strategies.settlement import SettlementStrategy
+    from sigbot.strategies.pair import PairStrategy
+    from sigbot.strategies.ladder import LadderStrategy
+    assert issubclass(ExitStrategy, GRIND_STOP_EXEMPT)
+    assert issubclass(SettlementStrategy, GRIND_STOP_EXEMPT)
+    assert issubclass(PairStrategy, GRIND_STOP_EXEMPT)
+    assert not issubclass(LadderStrategy, GRIND_STOP_EXEMPT)
+
+
 # ---------------------------------------------------------- rotation --------
 
 def _rot_view(held_roc_markets, candidate_mids):

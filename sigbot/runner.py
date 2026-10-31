@@ -198,6 +198,15 @@ def build_races(markets: list[dict], positions: list[dict]) -> tuple[dict, dict]
 STRATEGY_PRIORITY = {"exit": 0, "settlement": 1, "pair": 2, "ladder": 3,
                      "relvalue": 4, "sleeve": 5}
 
+# Strategy types still allowed to act once the grind window has closed (see
+# GRIND_STOP_HOURS_BEFORE_CLOSE and cycle()). A strategy belongs here if and
+# only if none of its orders can create new, round-trip-dependent exposure --
+# exit only reduces, settlement holds to resolution by design, and pair only
+# ever completes an existing leg into a resolution-paid floor (pair.py: "we
+# are paid 1.0 whatever happens"). Ladder is the one type excluded, because
+# it is the one whose edge model assumes minutes to round-trip.
+GRIND_STOP_EXEMPT = (ExitStrategy, SettlementStrategy, PairStrategy)
+
 
 def _truncate_by_priority(desired, live, managed, cap):
     """
@@ -516,9 +525,16 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
     # venue settles. Keep the loop alive so the process stays supervised and
     # the state file keeps updating, but stop asking for orders.
     #
-    # Inside the final window, run EXIT and SETTLEMENT only. Exit reduces
-    # exposure, and settlement's edge is largest closest to resolution. The
-    # grind is the one that breaks: it opens inventory it will never get to
+    # Inside the final window, run EXIT, SETTLEMENT and PAIR. Exit reduces
+    # exposure, settlement's edge is largest closest to resolution, and pair
+    # ONLY ever completes a race we already hold one side of into a
+    # guaranteed, resolution-paid floor -- see pair.py: "we are paid 1.0
+    # whatever happens. There is no forecast involved." It never opens new,
+    # uncovered directional exposure, so it carries settlement's risk profile
+    # (safe arbitrarily close to the close), not ladder's (needs the minutes
+    # to round-trip). It was grouped with ladder here only because it shares
+    # ladder's budget tag, which is a budgeting detail, not a risk one.
+    # LADDER is the one that breaks: it opens inventory it will never get to
     # round-trip, turning a sub-tick scratch trade into an unhedged election
     # bet. TRADING_CLOSE_UTC existed as a constant for the whole contest and
     # was referenced by nothing, so none of this was enforced.
@@ -527,8 +543,7 @@ def cycle(client: Client, risk: RiskManager, state: dict, *,
         if hours_left <= 0 and not isinstance(strat, ExitStrategy):
             counts[type(strat).__name__] = 0
             continue
-        if not grind_open and not isinstance(
-                (strat), (ExitStrategy, SettlementStrategy)):
+        if not grind_open and not isinstance(strat, GRIND_STOP_EXEMPT):
             counts[type(strat).__name__] = 0
             continue
         got = (strat.desired(view, races, party_exchange)

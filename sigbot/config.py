@@ -342,15 +342,33 @@ MIN_ANCHOR_COVERAGE = 0.90
 # stale quotes cannot be adversely selected for long.
 MAX_DEGRADED_SKIPS = 3
 
-# Hours before TRADING_CLOSE_UTC at which the GRIND strategies stop opening.
+# Hours before TRADING_CLOSE_UTC at which LADDER (the only strategy that can
+# still open un-hedged, round-trip-dependent inventory this close to the
+# close -- see runner.py's cycle() for why pair no longer shares this gate)
+# stops opening.
 #
-# The grind (ladder, pair) earns a sub-tick edge by round
-# -tripping inventory over minutes. A position it opens shortly before the
-# close cannot be round-tripped: it stops being a scratch trade and becomes an
-# unhedged bet on the election, at a price chosen by a strategy that was never
-# asked that question.
+# Ladder earns a sub-tick edge by round-tripping inventory over minutes: a
+# dip reverts, it buys the dip, the price comes back, it sells. A position it
+# opens shortly before the close cannot be round-tripped: it stops being a
+# scratch trade and becomes an unhedged bet on the election, at a price chosen
+# by a strategy that was never asked that question.
 #
-# The settlement book is deliberately exempt. Selling an overpriced tail an
-# hour before resolution is the BEST version of that trade, not the worst --
-# there is no time left for the venue to move against the anchor.
-GRIND_STOP_HOURS_BEFORE_CLOSE = 6.0
+# Raised 6.0 -> 20.0 on 2026-10-31, two days before the real Nov 3 election.
+# 6 hours only covers the final stretch before the Nov 4 17:00 UTC deadline;
+# it does nothing about the ~18-20 hours before that, when real results
+# actually arrive -- polls start closing ~23:00 UTC Nov 3 (parts of Indiana/
+# Kentucky), most states by 01:00-02:00 UTC Nov 4, the Pacific states and
+# Alaska by 04:00-06:00 UTC Nov 4. That window is exactly where ladder's core
+# assumption (a dip is noise that reverts in minutes) is most likely to be
+# false: a "dip" driven by an actual race being called is real information,
+# not noise, and has no reason to revert before the Nov 4 lock arrives to
+# freeze it in place. 20 hours moves the stop to ~17:00 ET Nov 3, before even
+# the earliest polls close, so ladder is flat of NEW risk before any real
+# results exist to misread. Existing inventory is unaffected -- ExitStrategy
+# keeps managing it throughout, same as always.
+#
+# The settlement book is deliberately exempt, unchanged by this. Selling an
+# overpriced tail an hour before resolution is the BEST version of that
+# trade, not the worst -- there is no time left for the venue to move away
+# from the anchor, and the anchor is exactly what election night confirms.
+GRIND_STOP_HOURS_BEFORE_CLOSE = 20.0

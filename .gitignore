@@ -26,8 +26,12 @@ venv/
 .idea/
 .vscode/
 
-# Research scratch - not committed yet (will be formalised later)
-research/
+# Research: the written findings (.md) and scripts (.py) ARE published.
+# What stays local: raw data (other participants' info, GitHub size limits),
+# raw scraped HTML, and bulky repetitive operational logs.
+research/data/
+research/scratch/
+research/logs/
 
 # stray image artifacts
 *.pgm

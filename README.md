@@ -44,6 +44,36 @@ is its own coin flip against its own anchor.
 | **Ladder** | Passive two-sided market-making for the small, fast-decaying microstructure edge — stopped automatically well before election night to avoid holding new directional risk into the close. |
 | **Exit** | Harvests ladder inventory before its edge decays (measured: real but gone by 30 minutes), while explicitly protecting settlement positions from being mistaken for stale inventory. |
 
+## What the trade data shows
+
+9,413 fills across the full 34 days, exported straight from the account —
+three things stood out when actually plotted.
+
+![Daily trade count](docs/images/daily-activity.png)
+
+Quiet, steady grinding for a month, then the final three days alone account
+for **~27% of the entire competition's trades** — the crowd-driven dip, the
+election-night two-way volatility, and real results landing, all compressed
+into 72 hours.
+
+![Price distribution of fills](docs/images/price-distribution.png)
+
+**59% of every YES-side fill** landed inside the 3–35 cent tail band this
+book exists to short. The second, smaller cluster around 60–90 cents is the
+ladder grinding ordinary two-sided spread on favorites — a different edge,
+correctly sized much smaller.
+
+![Market coverage](docs/images/market-coverage.png)
+
+178 of 237 markets traded, 75% coverage — but the gap is the interesting
+part. Of the 59 untouched markets, **35 were the correctly-priced favorite
+side of a race whose longshot side this book *did* short** (e.g. it shorted
+Republican-Delaware-Senate but never touched Democratic-Delaware-Senate,
+because that side wasn't mispriced). Only 12 races — mostly safe, thin
+single-party strongholds like Hawaii and Maryland governor — were sat out on
+*both* sides, because neither one ever cleared the edge threshold. The
+strategy wasn't cautious; it was selective.
+
 **One rule governs all of it**: the external anchor is never blended with the
 venue's own price. Averaging the two would erase the exact disagreement being
 traded. Either Polymarket's number stands alone, or the market doesn't get

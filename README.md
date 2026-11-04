@@ -140,6 +140,11 @@ several others were all short positions on the side that had, in fact, lost.
 
 ![Final standing](docs/images/profile-markets-traded.png)
 
+This wasn't watched casually — a side process logged rank every 5 minutes for
+the final week, independent of the leaderboard UI's own top-100 cutoff:
+
+![Rank over the final week](docs/images/rank-final-week.png)
+
 ## Where it landed
 
 105,600 SUSQies, rank 482 of 1,969, with several races (Nevada, Alaska,
@@ -147,6 +152,17 @@ Oregon governors; Alaska, Mississippi, Nebraska Senate) still uncalled and
 expected to resolve favorably on the same thesis over the following days to
 weeks — official settlement happens market-by-market, not at the trading
 deadline.
+
+Rank 482 undersells it a little. The field is brutally skewed — a handful of
+early, concentrated directional bets sit at the very top, and **the median
+participant finished essentially flat, at -11 SUSQies**. Pulled the complete,
+final standings for all 1,969 entrants to check:
+
+![Field-wide P&L distribution](docs/images/field-distribution.png)
+
+**75.5% of the field finished below this result.** Rank is a count of the
+few hundred people who got a concentrated bet right; percentile is a better
+read on whether the process itself worked.
 
 ## What worked, and what I'd do differently
 
@@ -167,4 +183,5 @@ have required gambling it away.
 
 **Technical reference:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 **Full trade history:** [data/trade_history.csv](data/trade_history.csv) (9,413 fills, exported via API)
+**Final standings, all 1,969 entrants:** [data/leaderboard_final.csv](data/leaderboard_final.csv)
 **Tests:** `python -m pytest` — 484 passing
